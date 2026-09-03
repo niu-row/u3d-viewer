@@ -17,6 +17,8 @@ internal sealed class SceneSettingsProfile
     public int Height { get; set; } = 720;
     public SceneCullingMode CullingMode { get; set; } = SceneCullingMode.MainCamera;
     public int CullingMask { get; set; } = -1;
+    public bool FollowMainCameraPosition { get; set; }
+    public bool FollowMainCameraRotation { get; set; }
 }
 
 internal static class SceneSettingsStore
