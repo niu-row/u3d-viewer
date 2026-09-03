@@ -20,6 +20,8 @@ public enum ViewerCommandKind
     CameraCullingMask,
     CameraFollowTransform,
     CameraReset,
+    CameraRecover,
+    CameraVisibility,
     CameraFocus,
     SelectObject,
     HierarchyExpanded
@@ -100,6 +102,11 @@ public static class ViewerCommandCodec
         string.Join("\t", "camera.follow", position ? "1" : "0", rotation ? "1" : "0");
 
     public static string EncodeCameraReset() => "camera.reset";
+
+    public static string EncodeCameraRecover() => "camera.recover";
+
+    public static string EncodeCameraVisibility(bool visible) =>
+        $"camera.visibility\t{(visible ? "1" : "0")}";
 
     public static string EncodeCameraFocus(int instanceId) =>
         string.Join("\t", "camera.focus", instanceId.ToString(CultureInfo.InvariantCulture));
@@ -204,6 +211,17 @@ public static class ViewerCommandCodec
 
             case "camera.reset" when parts.Length == 1:
                 command = new ViewerCommand(ViewerCommandKind.CameraReset);
+                return true;
+
+            case "camera.recover" when parts.Length == 1:
+                command = new ViewerCommand(ViewerCommandKind.CameraRecover);
+                return true;
+
+            case "camera.visibility" when parts.Length == 2 &&
+                (parts[1] == "0" || parts[1] == "1"):
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraVisibility,
+                    flag: parts[1] == "1");
                 return true;
 
             case "camera.focus" when parts.Length == 2 &&
