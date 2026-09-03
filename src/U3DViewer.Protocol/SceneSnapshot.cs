@@ -6,6 +6,7 @@ public sealed class SceneSnapshot
     public long Sequence { get; set; }
     public long UnixTimeMs { get; set; }
     public RenderTargetInfo? RenderTarget { get; set; }
+    public PerformanceInfo Performance { get; set; } = new();
     public SceneInfo[] Scenes { get; set; } = Array.Empty<SceneInfo>();
 }
 
@@ -23,7 +24,23 @@ public sealed class RenderTargetInfo
     public float NearClipPlane { get; set; }
     public float FarClipPlane { get; set; }
     public float OrthographicSize { get; set; }
+    public float MoveSpeed { get; set; }
+    public float IdleFps { get; set; }
+    public float InteractiveFps { get; set; }
     public string Status { get; set; } = string.Empty;
+}
+
+public sealed class PerformanceInfo
+{
+    public int HierarchyNodes { get; set; }
+    public double HierarchyScanMs { get; set; }
+    public double HierarchyScanAverageMs { get; set; }
+    public double HierarchyScanMaxMs { get; set; }
+    public double SceneRenderMs { get; set; }
+    public double SceneRenderAverageMs { get; set; }
+    public double SceneRenderMaxMs { get; set; }
+    public double SnapshotSerializeMs { get; set; }
+    public int SnapshotBytes { get; set; }
 }
 
 public sealed class SceneInfo
