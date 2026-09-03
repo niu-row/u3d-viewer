@@ -12,7 +12,7 @@ Unity game process
   │      or
   ├─ U3DViewer.Agent.IL2CPP
   │    ├─ SceneManager / GameObject / Transform / Component
-  │    └─ Scene viewer camera (later milestone)
+  │    └─ isolated Scene Camera
   │
   ├─ control/data ───── Named Pipe ───────────────┐
   │                                               │
@@ -26,23 +26,57 @@ Unity game process
 
 ## Backend boundary
 
-`U3DViewer.Protocol` must not reference Unity, BepInEx or Il2CppInterop types. Both agents translate runtime objects into plain `SceneSnapshot` DTOs before sending them to the viewer.
+`U3DViewer.Protocol` does not reference Unity, BepInEx or Il2CppInterop types. Both agents translate runtime objects into plain `SceneSnapshot` DTOs before sending them to the Viewer.
 
 Mono uses `BaseUnityPlugin.Update()` directly. IL2CPP uses `BasePlugin.Load()` and attaches an injected `RuntimeBehaviour` with `AddComponent<T>()` so Unity API access still occurs on Unity's main thread.
 
-The standalone viewer therefore does not need separate Mono and IL2CPP implementations.
+The standalone Viewer therefore does not need separate Mono and IL2CPP implementations.
 
-## Why two transport paths
+## Control and metadata path
 
-Scene metadata is small and irregular, so a named pipe is appropriate for scene snapshots, selection, camera commands and inspector requests.
+Named Pipe is bidirectional:
 
-The 3D image is high bandwidth and should not be copied GPU -> CPU -> IPC -> CPU -> GPU each frame. A later Windows/D3D11 milestone will use a native bridge and a shared D3D11 texture/resource.
+```text
+Agent -> Viewer
+  SceneSnapshot
+  RenderTargetInfo
 
-## Threading rule
+Viewer -> Agent
+  camera.move
+  camera.look
+  camera.speed
+  camera.projection
+  camera.reset
+  camera.focus
+```
 
-Unity object APIs are accessed only on Unity's main thread. Each agent captures plain DTO snapshots from its Unity update callback and hands serialized data to a background pipe thread.
+Unity object APIs are accessed only on Unity's main thread. Each Agent captures DTO snapshots and drains queued Viewer commands from its Unity update callback. Pipe reader/writer threads never directly access Unity objects.
 
-The pipe thread must never call `SceneManager`, `GameObject`, `Transform`, `Component`, `Camera`, `Renderer` or other Unity object APIs.
+## Scene pixel path
+
+M4 currently targets Windows x64 + Direct3D 11:
+
+```text
+Target game
+  SceneCamera.Render()
+    -> RenderTexture 1280x720 ARGB32
+    -> GetNativeTexturePtr()
+    -> U3DViewer.NativeBridge
+    -> D3D11_RESOURCE_MISC_SHARED_NTHANDLE
+    -> IDXGIKeyedMutex
+
+Viewer
+    -> OpenSharedResourceByName
+    -> keyed mutex acquire
+    -> CopyResource to staging texture
+    -> Map
+    -> Avalonia WriteableBitmap
+    -> Scene View
+```
+
+The named shared resource avoids transmitting a process-local HANDLE through the control protocol. `SceneSnapshot.RenderTarget` publishes the shared resource name, dimensions, DXGI format and current bridge status.
+
+The staging readback is intentionally a correctness-first implementation. The long-term Viewer should consume the shared GPU texture directly through a suitable graphics/external-image integration path.
 
 ## Milestones
 
@@ -50,50 +84,73 @@ The pipe thread must never call `SceneManager`, `GameObject`, `Transform`, `Comp
 
 - BepInEx 6 Mono agent loads in a built Mono game.
 - BepInEx 6 IL2CPP agent loads in a built IL2CPP game.
-- Standalone viewer process starts.
+- Standalone Viewer process starts.
 
 ### M1 — runtime hierarchy
 
 - Enumerate all loaded scenes.
 - Recursively capture root GameObjects and children.
 - Capture instance ID, active state, layer, tag, Transform and component type names.
-- Stream the same snapshot format from either backend to the standalone viewer.
+- Stream the same snapshot format from either backend to the standalone Viewer.
 
 ### M2 — desktop UI
 
-- Replace console output with Avalonia.
-- Hierarchy panel.
-- Inspector panel.
+Implemented:
+
+- Avalonia desktop window.
+- Runtime Hierarchy.
+- Runtime Inspector.
 - Connection/status UI.
 
-### M3 — scene camera control
+### M3 — Scene Camera control
 
-- Create an isolated runtime Camera in each backend.
-- Viewer sends WASD/mouse-look/focus commands.
-- Perspective/orthographic controls.
+Implemented foundation:
 
-### M4 — D3D11 scene transport
+- isolated runtime Camera in both backends.
+- bidirectional Viewer commands.
+- WASD/QE movement and keyboard look.
+- focus selected.
+- perspective/orthographic controls.
 
-- Native Unity graphics bridge.
-- Copy Scene Camera RenderTexture into a shareable D3D11 Texture2D.
-- Open shared resource from `U3DViewer.exe`.
-- Display it in the Scene panel.
+### M4 — D3D11 Scene transport
+
+Initial implementation present:
+
+- runtime RenderTexture.
+- native shared D3D11 Texture2D.
+- named NT shared resource.
+- keyed-mutex synchronization.
+- Viewer-side shared-resource open.
+- staging readback into Avalonia Scene View.
+
+Still required before M4 is considered stable:
+
+- real Mono runtime validation.
+- real IL2CPP runtime validation.
+- resize negotiation.
+- device-loss/recreation recovery.
+- direct GPU presentation in place of staging readback.
 
 ### M5 — scene tools
 
-- Object picking.
+Planned:
+
+- object picking.
 - Renderer bounds.
 - Collider visualization.
 - Camera frustums.
-- Grid and transform gizmos.
+- grid and transform gizmos.
 
 ### M6 — runtime hardening
 
-- Incremental hierarchy updates instead of full snapshots.
-- Better IL2CPP runtime component type resolution.
+Planned:
+
+- incremental hierarchy updates instead of full snapshots.
+- better IL2CPP runtime component type resolution.
 - `DontDestroyOnLoad` and hidden object enumeration.
-- Compatibility testing across Unity versions.
+- compatibility testing across Unity versions.
+- DX12/Vulkan transport backends after D3D11 is stable.
 
 ## Current constraints
 
-The bootstrap targets Windows x64, Unity Mono and Unity IL2CPP. It is read-only and intended for games the operator is authorized to inspect/debug. DX12 and Vulkan are deferred until the D3D11 runtime pipeline is stable.
+The current runtime path targets Windows x64, Unity Mono/IL2CPP, BepInEx 6 and Direct3D 11. It is read-only and intended for games the operator is authorized to inspect/debug. Runtime validation is local/manual; the repository intentionally does not use GitHub Actions.
