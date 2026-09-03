@@ -40,6 +40,8 @@ internal static class JsonSnapshotWriter
         NumberProperty(sb, "width", target.Width); sb.Append(',');
         NumberProperty(sb, "height", target.Height); sb.Append(',');
         NumberProperty(sb, "dxgiFormat", target.DxgiFormat); sb.Append(',');
+        NumberProperty(sb, "adapterLuid", target.AdapterLuid); sb.Append(',');
+        Property(sb, "adapterName", target.AdapterName); sb.Append(',');
         Property(sb, "status", target.Status);
         sb.Append('}');
     }
@@ -109,6 +111,11 @@ internal static class JsonSnapshotWriter
     }
 
     private static void NumberProperty(StringBuilder sb, string name, long value)
+    {
+        String(sb, name); sb.Append(':').Append(value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void NumberProperty(StringBuilder sb, string name, ulong value)
     {
         String(sb, name); sb.Append(':').Append(value.ToString(CultureInfo.InvariantCulture));
     }
