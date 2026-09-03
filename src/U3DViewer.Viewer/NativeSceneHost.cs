@@ -14,6 +14,7 @@ internal sealed class NativeSceneHost : NativeControlHost
     private const string LibraryName = "U3DViewer.NativeBridge";
     private const float MouseSensitivity = 0.12f;
     private const float ShiftBoost = 4f;
+    private static readonly TimeSpan RecoveryWatchdogInterval = TimeSpan.FromSeconds(1);
 
     private readonly Action<string> _sendCommand;
     private readonly Action _focusSelected;
@@ -33,6 +34,7 @@ internal sealed class NativeSceneHost : NativeControlHost
     private long _lastTickTimestamp = Stopwatch.GetTimestamp();
     private float _moveSpeed = 10f;
     private string _lastStatus = string.Empty;
+    private DateTime _nextRecoveryWatchdogUtc = DateTime.MinValue;
 
     public NativeSceneHost(Action<string> sendCommand, Action focusSelected)
     {
@@ -299,9 +301,14 @@ internal sealed class NativeSceneHost : NativeControlHost
                 var presentResult = PresentNative(openedWindow);
                 if (presentResult >= 0)
                 {
+                    if (presentResult > 0)
+                    {
+                        _nextRecoveryWatchdogUtc = DateTime.MinValue;
+                    }
                     continue;
                 }
 
+                RequestRecoveryWatchdog("present failure");
                 ClosePresenterNative(openedWindow);
                 presenterOpen = false;
                 openedWindow = IntPtr.Zero;
@@ -333,10 +340,20 @@ internal sealed class NativeSceneHost : NativeControlHost
             if (opened == 0)
             {
                 var hresult = U3DViewer_GetScenePresenterLastError(window);
-                var stage = DescribeInitStage(U3DViewer_GetScenePresenterInitStage(window));
+                var initStage = U3DViewer_GetScenePresenterInitStage(window);
+                var stage = DescribeInitStage(initStage);
                 SetStatus(
                     $"Could not open GPU Scene presenter at {stage} (HRESULT 0x{hresult:X8}, source DXGI {target.DxgiFormat}). " +
                     $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
+
+                // D3D resource/open failures can be transient when the Unity render thread has not
+                // completed the current shared-texture generation yet. Kick Camera.Reset at most
+                // once per second while the presenter remains unhealthy. This matches the manual
+                // recovery action without flooding the Agent command pipe.
+                if (initStage >= 4 && initStage <= 12)
+                {
+                    RequestRecoveryWatchdog($"open failure at {stage}");
+                }
                 return false;
             }
 
@@ -384,6 +401,19 @@ internal sealed class NativeSceneHost : NativeControlHost
         }
 
         return -1;
+    }
+
+    private void RequestRecoveryWatchdog(string reason)
+    {
+        var now = DateTime.UtcNow;
+        if (now < _nextRecoveryWatchdogUtc)
+        {
+            return;
+        }
+
+        _nextRecoveryWatchdogUtc = now + RecoveryWatchdogInterval;
+        ViewerLog.Warning($"Scene presenter watchdog requested Camera.Reset after {reason}.");
+        Dispatcher.UIThread.Post(() => _sendCommand(ViewerCommandCodec.EncodeCameraReset()));
     }
 
     private static void ClosePresenterNative(IntPtr window)
