@@ -244,7 +244,7 @@ internal static class BepInExBootstrap
             for (var index = sectionIndex + 1; index < lines.Count; index++)
             {
                 var trimmed = lines[index].Trim();
-                if (trimmed.StartsWith('[', StringComparison.Ordinal) && trimmed.EndsWith(']', StringComparison.Ordinal))
+                if (trimmed.StartsWith("[", StringComparison.Ordinal) && trimmed.EndsWith("]", StringComparison.Ordinal))
                 {
                     sectionEnd = index;
                     break;
