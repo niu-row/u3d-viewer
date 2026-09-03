@@ -2,10 +2,10 @@
 
 ## Goal
 
-Observe the live scene of an already-built Unity game from a standalone `U3DViewer.exe`, with target setup driven from the GUI instead of per-game configuration files.
+Observe and inspect the live scene of an already-built Unity game from a standalone Viewer, with target preparation driven from the GUI instead of per-game configuration files.
 
 ```text
-U3DViewer.exe
+U3DViewer.Viewer.exe
 ├─ Process Picker / Open Game
 ├─ Runtime Preparation
 │  ├─ detect Mono / IL2CPP
@@ -14,113 +14,214 @@ U3DViewer.exe
 │  ├─ fingerprint target compatibility
 │  ├─ reuse cached Agent OR build/cache once
 │  └─ deploy / launch / wait for Agent
-├─ Hierarchy
-├─ Inspector
+├─ lazy Runtime Hierarchy
+├─ Runtime Inspector
 └─ Scene View
           │
           ▼
 Unity game process
 ├─ U3DViewer.Agent.Mono OR U3DViewer.Agent.IL2CPP
 ├─ Named Pipe: u3d-viewer-<PID>
-└─ D3D11 named shared Texture2D
+└─ D3D11 named shared Texture2D + keyed mutex
 ```
 
 ## Runtime preparation boundary
 
-The normal development build does not know a target game. `Ctrl+Shift+B` builds Viewer + NativeBridge and copies the Agent/Protocol source projects into `agent-builder/` beside the Viewer.
+The normal development build does not know a target game. `Ctrl+Shift+B` builds Viewer + NativeBridge and recreates the Agent/Protocol source payload under `agent-builder/` beside the Viewer.
 
 After the user selects a game, the Viewer:
 
 1. detects the Unity backend from the game layout;
-2. installs the pinned BepInEx 6 x64 runtime when BepInEx is absent;
-3. for IL2CPP, launches a temporary bootstrap process when `BepInEx/interop` still needs to be generated;
-4. computes a compatibility fingerprint from the selected backend, Agent/Protocol builder inputs, and SHA-256 hashes of the Unity assemblies used at compile time;
-5. reuses `%LOCALAPPDATA%/U3DViewer/AgentCache/<backend>/<fingerprint>/` when that profile already exists;
-6. otherwise copies the bundled Agent Builder workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, invokes the local .NET SDK with dynamically resolved Unity references, and stores the resulting Agent + Protocol in the cache;
-7. deploys Agent + Protocol + NativeBridge;
-8. launches/restarts the game and waits for its PID-specific pipe.
+2. installs the pinned BepInEx 6 x64 runtime when missing;
+3. for IL2CPP, launches a temporary bootstrap process when required interop assemblies are incomplete;
+4. waits until the Unity core, scene, and `Il2Cppmscorlib` references required by the Agent are actually resolvable;
+5. computes a compatibility fingerprint from the backend, bundled Agent/Protocol builder inputs, and SHA-256 hashes of compile-time Unity/interop references;
+6. reuses `%LOCALAPPDATA%/U3DViewer/AgentCache/<backend>/<fingerprint>/` when available;
+7. otherwise copies the bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, invokes the local .NET SDK with dynamically resolved references, and caches the resulting Agent + Protocol;
+8. deploys Agent + Protocol + NativeBridge;
+9. launches/restarts the game and waits for its PID-specific pipe.
 
-Mono compile references come from `<Game>_Data/Managed`. IL2CPP compile references come from `BepInEx/interop`. The cache key is based on compatibility inputs, not the game path, so multiple games can reuse one Agent when their referenced Unity binaries are identical.
-
-The current strategy deliberately prefers exact binary compatibility over blindly treating all Unity versions as ABI-compatible. Mono therefore behaves like a shared compatibility-profile Agent rather than one universal binary across every Unity release. IL2CPP uses the same approach against generated Unity proxy assemblies. Moving more Unity API access behind runtime reflection/compatibility adapters can broaden the Mono reuse boundary later.
-
-A user-selected running game is only asked to close normally. U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process created by U3DViewer itself may be terminated after interop generation.
+A user-selected running game is only asked to close normally. U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process created by U3DViewer itself may be terminated after interop generation completes.
 
 ## Backend boundary
 
-`U3DViewer.Protocol` does not reference Unity, BepInEx or Il2CppInterop types. Both agents translate runtime objects into plain `SceneSnapshot` DTOs before sending them to the Viewer.
+`U3DViewer.Protocol` contains only runtime-neutral DTOs and command encoding. It does not reference Unity, BepInEx, or Il2CppInterop types.
 
-Mono uses `BaseUnityPlugin.Update()` directly. IL2CPP uses `BasePlugin.Load()` and attaches a runtime behaviour so Unity API access still occurs on Unity's main thread.
+Mono uses `BaseUnityPlugin.Update()` directly. IL2CPP uses `BasePlugin.Load()` plus a runtime `MonoBehaviour`. Unity APIs are accessed only from Unity's main thread in both backends.
 
-The standalone Viewer therefore has one backend-neutral inspection UI and protocol.
+The Mono and IL2CPP Agents intentionally remain separate compatibility targets. Their runtime logic is closely mirrored, but the different BepInEx/interop environments make aggressive source unification a compatibility risk until broader runtime validation exists.
+
+## Connection lifetime
+
+The Agent creates one PID-specific duplex Named Pipe:
+
+```text
+u3d-viewer-<PID>
+```
+
+The Agent performs no Scene Camera rendering or Hierarchy scanning while no Viewer is connected. `Application.runInBackground` is forced on while the Agent is loaded so switching focus to the standalone Viewer does not stop Unity's player loop; the original value is restored when the Agent unloads.
+
+Viewer camera/control writes use a bounded asynchronous channel so Avalonia's UI thread never blocks on pipe I/O.
 
 ## Control and metadata path
 
-Named Pipe is bidirectional:
+Agent -> Viewer sends complete snapshots for the currently requested lazy tree surface:
 
 ```text
-Agent -> Viewer
-  SceneSnapshot
-  RenderTargetInfo
-
-Viewer -> Agent
-  camera.move
-  camera.look
-  camera.speed
-  camera.projection
-  camera.reset
-  camera.focus
+SceneSnapshot
+├─ Scenes / lazy GameObject hierarchy
+├─ selected-object Inspector data
+├─ RenderTargetInfo
+│  ├─ shared texture identity
+│  ├─ adapter/DXGI data
+│  ├─ projection/lens state
+│  ├─ Scene FPS/resolution state
+│  ├─ fly speed
+│  └─ culling-mask mode/mask/layer names
+└─ PerformanceInfo
 ```
 
-Unity object APIs are accessed only on Unity's main thread. Pipe reader/writer threads never directly access Unity objects.
+Viewer -> Agent commands currently include:
+
+```text
+camera.move
+camera.look
+camera.speed
+camera.projection
+camera.lens
+camera.stream
+camera.culling
+camera.reset
+camera.focus
+selection.set
+hierarchy.expanded
+```
+
+Metadata currently uses newline-delimited JSON over the Named Pipe. JSON serialization runs off the Unity main thread. A binary/shared-memory metadata transport is optional future work only if measured payload/deserialize costs justify it.
+
+## Lazy Hierarchy path
+
+Hierarchy optimization happens before serialization rather than through a complex post-scan delta protocol.
+
+Initial state:
+
+```text
+Scene -> root GameObjects only
+```
+
+When a user expands a node:
+
+```text
+Viewer
+  -> hierarchy.expanded <instanceId> true
+Agent
+  -> scan only the newly requested branch
+```
+
+Unexpanded descendants are represented by `ChildCount` without recursively reading their children. The Viewer keeps already loaded child objects locally so collapse/re-expand is fast.
+
+Unity-side scans are spread across frames:
+
+```text
+normal scan       <= 64 nodes / slice, about 0.75 ms budget
+interactive scan  <= 256 nodes / slice, about 2.0 ms budget
+```
+
+Interactive mode is temporary and is used after explicit expand/selection operations. Inspector-heavy fields such as Components, Tag, and Transform details are collected only for the selected GameObject.
+
+## Scene Camera
+
+The Agent creates an isolated `__U3DViewerCamera` with its own RenderTexture. The Viewer controls this camera independently of the game's output camera.
+
+Current adjustable state includes:
+
+- Perspective / Orthographic projection
+- FOV
+- near/far clip planes
+- orthographic size
+- fly speed
+- idle Scene FPS
+- interactive Scene FPS
+- RenderTexture width/height
+- culling mask
+
+Default stream values are:
+
+```text
+Idle FPS        15
+Active FPS      30
+Width           1280
+Height          720
+```
+
+All are runtime settings rather than fixed transport constants.
+
+### Culling mask
+
+Three modes are supported:
+
+```text
+All
+  -> cullingMask = 0xFFFFFFFF
+
+Copy Main Camera
+  -> follows Camera.main.cullingMask at snapshot cadence
+  -> falls back to All when no usable Camera.main exists
+
+Manual
+  -> explicit 32-bit Layer mask selected in the Viewer
+```
+
+The Agent also publishes the game's 32 Unity Layer names for the manual selector.
 
 ## Scene pixel path
 
-Current M4 path targets Windows x64 + Direct3D 11:
+Current transport targets Windows x64 + Direct3D 11:
 
 ```text
 Target game
   SceneCamera.Render()
-    -> RenderTexture 1280x720 ARGB32
+    -> RenderTexture
     -> GetNativeTexturePtr()
-    -> U3DViewer.NativeBridge writer
+    -> NativeBridge writer
     -> GPU CopyResource into named shared Texture2D
     -> D3D11_RESOURCE_MISC_SHARED_NTHANDLE
     -> IDXGIKeyedMutex (writer key 0 -> 1)
 
-Named resource + adapter LUID
+Named resource + source adapter LUID
               |
               v
 Viewer
   Avalonia NativeControlHost
     -> Win32 child HWND
-    -> D3D11 device created on the same DXGI adapter LUID
+    -> D3D11 device created on source DXGI adapter
     -> OpenSharedResourceByName
     -> IDXGIKeyedMutex (reader key 1 -> 0)
-    -> pixel shader samples shared texture directly
-       - performs Unity RenderTexture Y flip
-       - preserves source aspect ratio / letterboxes
-    -> flip-model HWND swap chain
+    -> ShaderResourceView
+    -> fullscreen shader
+       - Unity RenderTexture Y flip on GPU
+       - aspect-preserving viewport / letterbox
+    -> DXGI swap chain
     -> Present
 ```
 
-There is no active GPU-to-CPU staging readback or `WriteableBitmap` Scene path. The Viewer-side pixel path remains on the GPU after the shared resource is opened.
+There is no active GPU-to-CPU staging readback or `WriteableBitmap` Scene path. The legacy native CPU reader has been removed. `NativeBridge.cpp` owns the target-process writer; `ScenePresenter.cpp` owns the Viewer GPU presenter and native input host.
 
-The named shared resource avoids transmitting a process-local HANDLE through the control protocol. `SceneSnapshot.RenderTarget` publishes the shared resource name, dimensions, DXGI format, source adapter LUID/name and current bridge status. The writer keeps the named NT handle alive for the lifetime of the shared resource.
+Changing Scene resolution recreates the RenderTexture and shared resource with a generation-specific name so the Viewer reopens the correct native object.
 
 ## Scene input path
 
-The embedded Scene HWND receives native Win32 input directly:
+The embedded child HWND receives native Win32 input directly:
 
 ```text
 RMB
-  -> capture native child HWND
-  -> hide cursor while looking
+  -> capture child HWND
+  -> hide cursor
   -> Raw Input mouse deltas
   -> camera.look
 
 RMB + WASD/QE
-  -> key state sampled at ~60 Hz
+  -> key-state sampling
   -> normalized movement vector
   -> camera.move
 
@@ -134,74 +235,56 @@ F
   -> camera.focus
 ```
 
-This avoids keyboard auto-repeat and removes the pointer-edge limitation of an Avalonia-only mouse-drag implementation.
+The Viewer displays the current fly speed and updates it immediately after wheel input.
 
-The Agent Scene Camera renders at about 30 FPS while idle. Move/look/focus/projection interaction temporarily boosts the source render toward 60 FPS for responsive navigation, then falls back to the idle rate to reduce the extra `Camera.Render()` cost imposed on the game.
+## Performance metrics
 
-## Milestones
+The Agent publishes lightweight metrics with snapshots:
 
-### M0-M3
+- Scene `Camera.Render()` CPU-side submission time: last / average / maximum;
+- lazy Hierarchy scanned nodes and scan time: last / average / maximum;
+- JSON serialization time;
+- UTF-8 snapshot payload size.
 
-Implemented foundations:
+The Scene Render metric is CPU timing around `Camera.Render()` plus native copy-event submission, not a D3D11 GPU timestamp.
 
-- Mono and IL2CPP Agent projects
-- shared runtime-neutral protocol
-- Runtime Hierarchy and Inspector
-- PID-specific duplex Named Pipe
-- isolated Scene Camera
-- startup process picker
+## Viewer responsibilities
 
-### M4 — D3D11 Scene transport and automated preparation
+The Viewer currently contains four broad areas:
 
-Current implementation:
+```text
+Runtime preparation
+  AgentBuilder / BepInExBootstrap / GameAutomation / process discovery
 
-- runtime RenderTexture
-- native shared D3D11 Texture2D
-- named NT shared resource with retained writer handle
-- keyed-mutex synchronization
-- source/Viewer DXGI adapter LUID matching
-- embedded Win32 Scene HWND via Avalonia `NativeControlHost`
-- Viewer-side GPU shader presentation with no CPU readback
-- GPU-side Y flip
-- aspect-preserving presentation
-- Raw Input Scene fly camera controls
-- idle 30 FPS / interactive 60 FPS Scene Camera scheduling
-- GUI `Attach`, `Prepare + Restart`, and `Open Game...`
-- automatic BepInEx bootstrap when missing
-- automatic IL2CPP interop bootstrap
-- on-demand Agent build for a new compatibility profile
-- compatibility-keyed Agent cache/reuse
-- automatic deployment and Agent wait/connect
+Connection + protocol consumption
+  ViewerConnection
 
-Still required before M4 is considered broadly hardened:
+Runtime inspection UI
+  MainWindow / Hierarchy / Inspector / Scene settings
 
-- real Mono runtime validation across multiple Unity generations
-- broader IL2CPP/Unity-version compatibility testing
-- device-loss / keyed-mutex abandonment recovery testing
-- render-target resolution negotiation instead of fixed 1280x720 source rendering
-- hybrid-GPU and driver matrix validation beyond adapter-LUID matching
+Native Scene presentation
+  NativeSceneHost / SceneCullingUi / Localization
+```
 
-### M5 — scene tools
-
-Planned:
-
-- object picking
-- Renderer bounds
-- Collider visualization
-- Camera frustums
-- grid and transform gizmos
-
-### M6 — runtime hardening
-
-Planned:
-
-- incremental hierarchy updates
-- better IL2CPP component type resolution
-- `DontDestroyOnLoad` / hidden object enumeration
-- broader version-agnostic Mono compatibility adapter
-- packaged/self-contained Agent compiler strategy that does not require a separately installed SDK for uncached profiles
-- DX12/Vulkan transport backends after D3D11 is stable
+The functional boundaries are sound, but `MainWindow` and the current localization/culling UI adapters are the main areas that should be decomposed before many more Scene tools are added.
 
 ## Current constraints
 
-The current runtime path targets Windows x64, Unity Mono/IL2CPP, BepInEx 6 and Direct3D 11. It is intended for games the operator is authorized to inspect/debug. Runtime validation remains local/manual; the repository intentionally does not use GitHub Actions.
+- Windows x64 first
+- Direct3D 11 Scene transport
+- uncached Agent profiles require a local .NET SDK
+- metadata still uses Named Pipe + JSON
+- unusual/custom Unity launchers can require extra process-discovery handling
+- picking, Renderer bounds, Collider visualization, Camera frustums, grid, and transform gizmos are not implemented
+- runtime validation is local/manual; the repository intentionally does not use GitHub Actions
+
+## Next structural work
+
+Prefer small, measured changes rather than another large transport rewrite:
+
+1. split `MainWindow` into Hierarchy, Inspector, and Scene panel/controller components before adding more tools;
+2. replace periodic visual-tree localization rewriting with explicit localized bindings/state;
+3. move Scene culling controls into the Scene panel instead of wrapping the whole window;
+4. remove duplicated Agent code only where the Mono and IL2CPP compile/runtime surface is demonstrably identical;
+5. pause or reduce Scene presentation/rendering when the Scene surface is not visible;
+6. consider binary/shared-memory metadata only if performance metrics show JSON is material.
