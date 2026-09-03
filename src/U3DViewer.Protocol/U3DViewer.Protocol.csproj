@@ -5,6 +5,10 @@
     <RootNamespace>U3DViewer.Protocol</RootNamespace>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net35'">
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
   <ItemGroup Condition="'$(TargetFramework)' == 'net35'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
