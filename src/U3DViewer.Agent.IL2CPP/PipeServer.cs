@@ -16,12 +16,15 @@ internal sealed class PipeServer : IDisposable
     private Thread? _thread;
     private NamedPipeServerStream? _activePipe;
     private volatile bool _stopping;
+    private volatile bool _viewerConnected;
 
     public PipeServer(string pipeName, ManualLogSource log)
     {
         _pipeName = pipeName;
         _log = log;
     }
+
+    public bool IsViewerConnected => _viewerConnected;
 
     public void Start()
     {
@@ -36,6 +39,11 @@ internal sealed class PipeServer : IDisposable
 
     public void Publish(string json)
     {
+        if (!_viewerConnected)
+        {
+            return;
+        }
+
         _outbound.Enqueue(json);
         while (_outbound.Count > 2 && _outbound.TryDequeue(out _)) { }
         _signal.Set();
@@ -59,6 +67,7 @@ internal sealed class PipeServer : IDisposable
                 _activePipe = pipe;
                 _log.LogInfo($"Waiting for viewer on pipe '{_pipeName}'...");
                 pipe.WaitForConnection();
+                _viewerConnected = true;
                 _log.LogInfo("Viewer connected.");
 
                 var readerFinished = 0;
@@ -113,7 +122,10 @@ internal sealed class PipeServer : IDisposable
             }
             finally
             {
+                _viewerConnected = false;
                 _activePipe = null;
+                while (_outbound.TryDequeue(out _)) { }
+                while (_inbound.TryDequeue(out _)) { }
             }
         }
     }
@@ -143,6 +155,7 @@ internal sealed class PipeServer : IDisposable
     public void Dispose()
     {
         _stopping = true;
+        _viewerConnected = false;
         _signal.Set();
         try { _activePipe?.Dispose(); } catch { }
         _thread?.Join(1000);
