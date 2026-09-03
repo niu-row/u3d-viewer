@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <iterator>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,8 @@ namespace
         ComPtr<ID3D11SamplerState> Sampler;
         UINT Width = 0;
         UINT Height = 0;
+        UINT SourceWidth = 0;
+        UINT SourceHeight = 0;
         LUID AdapterLuid{};
         std::wstring AdapterName;
     };
@@ -300,7 +305,7 @@ namespace
         ComPtr<ID3DBlob> errors;
         return D3DCompile(
             source,
-            strlen(source),
+            std::strlen(source),
             "U3DViewer.ScenePresenter",
             nullptr,
             nullptr,
@@ -347,7 +352,6 @@ struct PSIn
 
 float4 main(PSIn input) : SV_TARGET
 {
-    // Unity's D3D11 RenderTexture is vertically inverted relative to the HWND presentation surface.
     return SceneTexture.Sample(SceneSampler, float2(input.UV.x, 1.0 - input.UV.y));
 }
 )";
@@ -431,6 +435,37 @@ float4 main(PSIn input) : SV_TARGET
         return S_OK;
     }
 
+    D3D11_VIEWPORT BuildSceneViewport(const Presenter& presenter, UINT width, UINT height)
+    {
+        D3D11_VIEWPORT viewport{};
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+
+        if (presenter.SourceWidth == 0 || presenter.SourceHeight == 0)
+        {
+            viewport.Width = static_cast<float>(width);
+            viewport.Height = static_cast<float>(height);
+            return viewport;
+        }
+
+        const float sourceAspect = static_cast<float>(presenter.SourceWidth) / static_cast<float>(presenter.SourceHeight);
+        const float hostAspect = static_cast<float>(width) / static_cast<float>(height);
+        if (hostAspect > sourceAspect)
+        {
+            viewport.Height = static_cast<float>(height);
+            viewport.Width = viewport.Height * sourceAspect;
+            viewport.TopLeftX = (static_cast<float>(width) - viewport.Width) * 0.5f;
+        }
+        else
+        {
+            viewport.Width = static_cast<float>(width);
+            viewport.Height = viewport.Width / sourceAspect;
+            viewport.TopLeftY = (static_cast<float>(height) - viewport.Height) * 0.5f;
+        }
+
+        return viewport;
+    }
+
     HRESULT InitializePresenter(Presenter& presenter, HWND window, const wchar_t* sharedName, std::uint64_t adapterLuid)
     {
         presenter.Window = window;
@@ -482,6 +517,11 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
+        D3D11_TEXTURE2D_DESC sourceDesc{};
+        presenter.SharedTexture->GetDesc(&sourceDesc);
+        presenter.SourceWidth = sourceDesc.Width;
+        presenter.SourceHeight = sourceDesc.Height;
+
         hr = presenter.SharedTexture.As(&presenter.SharedMutex);
         if (FAILED(hr))
         {
@@ -523,8 +563,8 @@ float4 main(PSIn input) : SV_TARGET
 
         RECT client{};
         GetClientRect(window, &client);
-        const UINT width = std::max<LONG>(1, client.right - client.left);
-        const UINT height = std::max<LONG>(1, client.bottom - client.top);
+        const UINT width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
+        const UINT height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
 
         DXGI_SWAP_CHAIN_DESC1 swapDesc{};
         swapDesc.Width = width;
@@ -588,11 +628,9 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
-        D3D11_VIEWPORT viewport{};
-        viewport.Width = static_cast<float>(width);
-        viewport.Height = static_cast<float>(height);
-        viewport.MinDepth = 0.0f;
-        viewport.MaxDepth = 1.0f;
+        const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+        presenter.Context->ClearRenderTargetView(presenter.RenderTargetView.Get(), black);
+        const D3D11_VIEWPORT viewport = BuildSceneViewport(presenter, width, height);
 
         ID3D11RenderTargetView* renderTarget = presenter.RenderTargetView.Get();
         presenter.Context->OMSetRenderTargets(1, &renderTarget, nullptr);
@@ -610,7 +648,6 @@ float4 main(PSIn input) : SV_TARGET
 
         ID3D11ShaderResourceView* nullView = nullptr;
         presenter.Context->PSSetShaderResources(0, 1, &nullView);
-        presenter.Context->Flush();
 
         const HRESULT releaseHr = presenter.SharedMutex->ReleaseSync(0);
         if (FAILED(releaseHr))
