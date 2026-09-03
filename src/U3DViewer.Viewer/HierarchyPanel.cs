@@ -145,7 +145,7 @@ internal sealed class HierarchyPanel : Border
             var node = target.FirstOrDefault(item => !item.IsPlaceholder && item.InstanceId == gameObject.InstanceId);
             if (node is null)
             {
-                node = HierarchyNode.GameObject(gameObject);
+                node = HierarchyNode.FromGameObject(gameObject);
                 target.Insert(Math.Min(index, target.Count), node);
             }
             else
@@ -371,7 +371,7 @@ internal sealed class HierarchyPanel : Border
                 SceneBuildIndex = buildIndex
             };
 
-        public static HierarchyNode GameObject(GameObjectInfo gameObject) =>
+        public static HierarchyNode FromGameObject(GameObjectInfo gameObject) =>
             new($"go:{gameObject.InstanceId}", gameObject.InstanceId, string.Empty, false)
             {
                 GameObject = gameObject
