@@ -9,12 +9,16 @@ obj/
 # Build output
 artifacts/
 dist/
+build/
 
 # Local Unity/BepInEx references
 lib/
 *.local.props
 
-# Native build output (future)
+# Local U3DViewer configuration
+u3dviewer.local.json
+
+# Native build output
 CMakeFiles/
 CMakeCache.txt
 cmake-build-*/
