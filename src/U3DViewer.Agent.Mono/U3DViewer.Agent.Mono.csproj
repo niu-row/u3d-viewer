@@ -1,15 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFrameworks>net35;netstandard2.0</TargetFrameworks>
     <AssemblyName>U3DViewer.Agent.Mono</AssemblyName>
     <RootNamespace>U3DViewer.Agent.Mono</RootNamespace>
     <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net35'">
+    <DefineConstants>$(DefineConstants);LEGACY_MONO</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="BepInEx.Core" Version="6.0.0-be.785" />
     <PackageReference Include="BepInEx.Unity.Mono" Version="6.0.0-be.785" />
     <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net35'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
 
   <!--
