@@ -40,6 +40,9 @@ public sealed class Plugin : BaseUnityPlugin
     private int _lastScanNodes;
     private double _lastSerializeMs;
     private int _lastSnapshotBytes;
+    private float _gameFpsWindowStart;
+    private int _gameFpsWindowFrames;
+    private double _gameFps;
     private bool _originalRunInBackground;
     private bool _runInBackgroundCaptured;
 
@@ -82,6 +85,8 @@ public sealed class Plugin : BaseUnityPlugin
         {
             Application.runInBackground = true;
         }
+
+        UpdateGameFps();
 
         while (pipeServer.TryDequeueCommand(out var command))
         {
@@ -245,6 +250,7 @@ public sealed class Plugin : BaseUnityPlugin
 
     private PerformanceInfo BuildPerformanceInfo() => new()
     {
+        GameFps = _gameFps,
         HierarchyNodes = _lastScanNodes,
         HierarchyScanMs = _lastScanMs,
         HierarchyScanAverageMs = _averageScanMs,
@@ -252,6 +258,27 @@ public sealed class Plugin : BaseUnityPlugin
         SnapshotSerializeMs = _lastSerializeMs,
         SnapshotBytes = _lastSnapshotBytes
     };
+
+    private void UpdateGameFps()
+    {
+        var now = Time.unscaledTime;
+        if (_gameFpsWindowStart <= 0f)
+        {
+            _gameFpsWindowStart = now;
+            _gameFpsWindowFrames = 0;
+        }
+
+        _gameFpsWindowFrames++;
+        var elapsed = now - _gameFpsWindowStart;
+        if (elapsed < 0.5f)
+        {
+            return;
+        }
+
+        _gameFps = elapsed > 0f ? _gameFpsWindowFrames / elapsed : 0d;
+        _gameFpsWindowStart = now;
+        _gameFpsWindowFrames = 0;
+    }
 
     private void RecordHierarchyScan(int nodes, double milliseconds)
     {
@@ -293,6 +320,9 @@ public sealed class Plugin : BaseUnityPlugin
         _lastScanNodes = 0;
         _lastSerializeMs = 0;
         _lastSnapshotBytes = 0;
+        _gameFpsWindowStart = 0f;
+        _gameFpsWindowFrames = 0;
+        _gameFps = 0d;
     }
 
     private void OnDestroy()
