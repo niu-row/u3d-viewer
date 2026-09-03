@@ -22,6 +22,8 @@ internal sealed class MainWindow : Window
 
     private int _sceneBootstrapAttempts;
     private bool _sceneTargetReady;
+    private bool _sceneVisibilitySent;
+    private bool _lastSceneVisible;
 
     public MainWindow()
     {
@@ -70,7 +72,26 @@ internal sealed class MainWindow : Window
         _connection.SnapshotReceived += snapshot => Dispatcher.UIThread.Post(() => ApplySnapshot(snapshot));
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
-        Opened += (_, _) => _connection.Start();
+        PropertyChanged += (_, e) =>
+        {
+            if (e.Property == WindowStateProperty || e.Property == IsVisibleProperty)
+            {
+                UpdateSceneRenderVisibility();
+            }
+        };
+        _scenePanel.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == IsVisibleProperty)
+            {
+                UpdateSceneRenderVisibility();
+            }
+        };
+
+        Opened += (_, _) =>
+        {
+            _connection.Start();
+            UpdateSceneRenderVisibility();
+        };
         Closed += (_, _) =>
         {
             _sceneBootstrapTimer.Stop();
@@ -186,6 +207,8 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Text = Localization.T("main.connected");
                 _connectionStatus.Foreground = Brushes.Green;
                 _connectionDetail.Text = Localization.T("main.receiving");
+                _sceneVisibilitySent = false;
+                UpdateSceneRenderVisibility();
                 StartSceneBootstrap();
                 break;
 
@@ -196,6 +219,7 @@ internal sealed class MainWindow : Window
                 _sceneBootstrapTimer.Stop();
                 _sceneBootstrapAttempts = 0;
                 _sceneTargetReady = false;
+                _sceneVisibilitySent = false;
                 _hierarchyPanel.ResetConnectionState();
                 _scenePanel.SetDisconnected();
                 break;
@@ -230,6 +254,26 @@ internal sealed class MainWindow : Window
 
         _sceneBootstrapAttempts++;
         _connection.TrySendCommand(ViewerCommandCodec.EncodeCameraReset());
+    }
+
+    private void UpdateSceneRenderVisibility()
+    {
+        var visible = IsVisible && WindowState != WindowState.Minimized && _scenePanel.IsVisible;
+        if (_sceneVisibilitySent && visible == _lastSceneVisible)
+        {
+            return;
+        }
+
+        if (!_connection.TrySendCommand(ViewerCommandCodec.EncodeCameraVisibility(visible)))
+        {
+            return;
+        }
+
+        _sceneVisibilitySent = true;
+        _lastSceneVisible = visible;
+        ViewerLog.Info(visible
+            ? "Scene Camera rendering resumed because the Viewer is visible."
+            : "Scene Camera rendering paused because the Viewer is hidden or minimized.");
     }
 
     private void SendCommand(string command)
