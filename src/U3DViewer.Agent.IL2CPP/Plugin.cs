@@ -34,6 +34,7 @@ public sealed class Plugin : BasePlugin
 
         RuntimeBehaviour.Initialize(_pipeServer, Log);
         AddComponent<RuntimeBehaviour>();
+        AddComponent<SourceCaptureEndOfFrameFallback>();
 
         Log.LogInfo($"U3D Viewer IL2CPP agent loaded. Pipe: {pipeName}");
     }
