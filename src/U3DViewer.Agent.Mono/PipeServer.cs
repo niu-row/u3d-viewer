@@ -270,9 +270,6 @@ internal sealed class PipeServer : IDisposable
         catch (InvalidOperationException)
         {
         }
-        catch (ObjectDisposedException)
-        {
-        }
     }
 #else
     private void RunModern()
