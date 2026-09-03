@@ -33,18 +33,17 @@
   </Target>
 
   <Target Name="CopyAgentBuilderSources" AfterTargets="Build">
+    <!-- The runtime Agent cache fingerprints these copied sources. Always recreate the payload
+         so a new Viewer cannot accidentally reuse stale Agent/Protocol sources left in bin/. -->
+    <RemoveDir Directories="$(OutputPath)agent-builder" />
     <MakeDir Directories="$(OutputPath)agent-builder\src\U3DViewer.Agent.Mono;$(OutputPath)agent-builder\src\U3DViewer.Agent.IL2CPP;$(OutputPath)agent-builder\src\U3DViewer.Protocol" />
     <Copy SourceFiles="@(AgentBuilderMonoSource)"
-          DestinationFiles="@(AgentBuilderMonoSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.Mono\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+          DestinationFiles="@(AgentBuilderMonoSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.Mono\%(RecursiveDir)%(Filename)%(Extension)')" />
     <Copy SourceFiles="@(AgentBuilderIl2CppSource)"
-          DestinationFiles="@(AgentBuilderIl2CppSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.IL2CPP\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+          DestinationFiles="@(AgentBuilderIl2CppSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.IL2CPP\%(RecursiveDir)%(Filename)%(Extension)')" />
     <Copy SourceFiles="@(AgentBuilderProtocolSource)"
-          DestinationFiles="@(AgentBuilderProtocolSource->'$(OutputPath)agent-builder\src\U3DViewer.Protocol\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+          DestinationFiles="@(AgentBuilderProtocolSource->'$(OutputPath)agent-builder\src\U3DViewer.Protocol\%(RecursiveDir)%(Filename)%(Extension)')" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\..\Directory.Build.props;$(MSBuildProjectDirectory)\..\..\NuGet.Config"
-          DestinationFolder="$(OutputPath)agent-builder"
-          SkipUnchangedFiles="true" />
+          DestinationFolder="$(OutputPath)agent-builder" />
   </Target>
 </Project>
