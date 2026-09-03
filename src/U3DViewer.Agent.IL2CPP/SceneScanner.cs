@@ -85,8 +85,10 @@ internal static class SceneScanner
         {
             return gameObject.tag ?? string.Empty;
         }
-        catch (UnityException)
+        catch (Exception)
         {
+            // IL2CPP UnityException is a generated proxy type rather than a CLR exception type.
+            // Il2CppInterop surfaces invocation failures through CLR exceptions, so catch those here.
             return string.Empty;
         }
     }
