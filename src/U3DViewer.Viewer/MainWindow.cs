@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
@@ -22,6 +23,10 @@ internal sealed class MainWindow : Window
     private readonly StackPanel _inspectorContent;
     private readonly TextBlock _sceneStatus;
     private readonly NativeSceneHost _sceneHost;
+    private readonly TextBox _fovBox;
+    private readonly TextBox _nearBox;
+    private readonly TextBox _farBox;
+    private readonly TextBox _orthographicSizeBox;
 
     private HierarchyNode? _selectedNode;
 
@@ -80,6 +85,15 @@ internal sealed class MainWindow : Window
             MaxWidth = 900,
             Margin = new Thickness(14, 8)
         };
+
+        _fovBox = CreateLensTextBox("60");
+        _nearBox = CreateLensTextBox("0.001");
+        _farBox = CreateLensTextBox("10000");
+        _orthographicSizeBox = CreateLensTextBox("5");
+        _fovBox.LostFocus += (_, _) => ApplyLensFromControls();
+        _nearBox.LostFocus += (_, _) => ApplyLensFromControls();
+        _farBox.LostFocus += (_, _) => ApplyLensFromControls();
+        _orthographicSizeBox.LostFocus += (_, _) => ApplyLensFromControls();
 
         _sceneHost = new NativeSceneHost(SendCameraCommand, FocusSelected)
         {
@@ -186,7 +200,7 @@ internal sealed class MainWindow : Window
     {
         var panel = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto")
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto")
         };
 
         panel.Children.Add(new TextBlock
@@ -201,7 +215,7 @@ internal sealed class MainWindow : Window
         {
             Orientation = Orientation.Horizontal,
             Spacing = 6,
-            Margin = new Thickness(10, 0, 10, 8)
+            Margin = new Thickness(10, 0, 10, 6)
         };
         toolbar.Children.Add(CreateCommandButton("Reset Camera", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraReset())));
         toolbar.Children.Add(CreateCommandButton("Perspective", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraProjection(false))));
@@ -210,7 +224,22 @@ internal sealed class MainWindow : Window
         Grid.SetRow(toolbar, 1);
         panel.Children.Add(toolbar);
 
-        Grid.SetRow(_sceneHost, 2);
+        var lensToolbar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Margin = new Thickness(10, 0, 10, 8),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        lensToolbar.Children.Add(CreateLensField("FOV", _fovBox));
+        lensToolbar.Children.Add(CreateLensField("Near", _nearBox));
+        lensToolbar.Children.Add(CreateLensField("Far", _farBox));
+        lensToolbar.Children.Add(CreateLensField("Ortho Size", _orthographicSizeBox));
+        lensToolbar.Children.Add(CreateCommandButton("Apply Lens", ApplyLensFromControls));
+        Grid.SetRow(lensToolbar, 2);
+        panel.Children.Add(lensToolbar);
+
+        Grid.SetRow(_sceneHost, 3);
         panel.Children.Add(_sceneHost);
 
         var statusBorder = new Border
@@ -219,7 +248,7 @@ internal sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Child = _sceneStatus
         };
-        Grid.SetRow(statusBorder, 3);
+        Grid.SetRow(statusBorder, 4);
         panel.Children.Add(statusBorder);
 
         return panel;
@@ -262,6 +291,30 @@ internal sealed class MainWindow : Window
         return button;
     }
 
+    private static TextBox CreateLensTextBox(string text) => new()
+    {
+        Text = text,
+        Width = 72,
+        HorizontalContentAlignment = HorizontalAlignment.Right
+    };
+
+    private static Control CreateLensField(string label, TextBox textBox)
+    {
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 4,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        panel.Children.Add(new TextBlock
+        {
+            Text = label,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        panel.Children.Add(textBox);
+        return panel;
+    }
+
     private static Control BuildHierarchyHeader(HierarchyNode node, INameScope _)
     {
         var text = new TextBlock();
@@ -278,6 +331,56 @@ internal sealed class MainWindow : Window
         else
         {
             _connectionDetail.Text = "Select a runtime GameObject before using Focus Selected.";
+        }
+    }
+
+    private void ApplyLensFromControls()
+    {
+        if (!TryParseLensValue(_fovBox.Text, out var fov) ||
+            !TryParseLensValue(_nearBox.Text, out var nearClip) ||
+            !TryParseLensValue(_farBox.Text, out var farClip) ||
+            !TryParseLensValue(_orthographicSizeBox.Text, out var orthographicSize) ||
+            fov < 1f || fov > 179f ||
+            orthographicSize <= 0f ||
+            farClip <= nearClip)
+        {
+            _connectionDetail.Text = "Invalid Scene lens values. FOV must be 1-179, Ortho Size > 0, and Far must be greater than Near.";
+            return;
+        }
+
+        SendCameraCommand(ViewerCommandCodec.EncodeCameraLens(fov, nearClip, farClip, orthographicSize));
+    }
+
+    private static bool TryParseLensValue(string? text, out float value)
+    {
+        if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+            float.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        value = 0f;
+        return false;
+    }
+
+    private void SyncLensControls(RenderTargetInfo? target)
+    {
+        if (target is null)
+        {
+            return;
+        }
+
+        SyncLensText(_fovBox, target.FieldOfView);
+        SyncLensText(_nearBox, target.NearClipPlane);
+        SyncLensText(_farBox, target.FarClipPlane);
+        SyncLensText(_orthographicSizeBox, target.OrthographicSize);
+    }
+
+    private static void SyncLensText(TextBox textBox, float value)
+    {
+        if (!textBox.IsFocused)
+        {
+            textBox.Text = value.ToString("0.######", CultureInfo.InvariantCulture);
         }
     }
 
@@ -315,6 +418,7 @@ internal sealed class MainWindow : Window
     private void ApplySnapshot(SceneSnapshot snapshot)
     {
         _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
+        SyncLensControls(snapshot.RenderTarget);
         _sceneHost.SetRenderTarget(snapshot.RenderTarget);
         SyncScenes(snapshot.Scenes);
 
