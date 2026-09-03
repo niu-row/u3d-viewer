@@ -22,8 +22,11 @@ internal sealed class ScenePanel : Grid
     private readonly TextBlock _moveSpeedStatus;
     private readonly Button _settingsButton;
     private readonly DispatcherTimer _resizeDebounce = new();
+    private readonly string _gameExecutablePath;
 
     private RenderTargetInfo? _latestTarget;
+    private SceneSettingsProfile? _savedProfile;
+    private bool _savedProfileApplied;
     private bool _autoViewport = true;
     private Size _pendingViewportSize;
     private int _requestedAutoWidth;
@@ -39,6 +42,11 @@ internal sealed class ScenePanel : Grid
         _sendCommand = sendCommand;
         _selectedInstanceId = selectedInstanceId;
         _setDetail = setDetail;
+        _gameExecutablePath = ViewerSession.Target?.ExecutablePath ?? string.Empty;
+        _savedProfile = string.IsNullOrWhiteSpace(_gameExecutablePath)
+            ? null
+            : SceneSettingsStore.Load(_gameExecutablePath);
+        _autoViewport = _savedProfile?.AutoViewport ?? true;
 
         RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto");
 
@@ -156,7 +164,22 @@ internal sealed class ScenePanel : Grid
         UpdatePerformanceStatus(performance);
         _sceneHost.SetRenderTarget(target);
 
-        if (_autoViewport && target is not null)
+        if (target is null)
+        {
+            return;
+        }
+
+        if (!_savedProfileApplied)
+        {
+            _savedProfileApplied = true;
+            if (_savedProfile is not null)
+            {
+                ApplyProfile(_savedProfile, target);
+                return;
+            }
+        }
+
+        if (_autoViewport)
         {
             ScheduleViewportResize(_sceneHost.Bounds.Size);
         }
@@ -165,6 +188,7 @@ internal sealed class ScenePanel : Grid
     public void SetDisconnected()
     {
         _latestTarget = null;
+        _savedProfileApplied = false;
         _requestedAutoWidth = 0;
         _requestedAutoHeight = 0;
         _resizeDebounce.Stop();
@@ -208,19 +232,49 @@ internal sealed class ScenePanel : Grid
             return;
         }
 
-        var dialog = new SceneSettingsWindow(target, _autoViewport, ApplySettings);
+        var dialog = new SceneSettingsWindow(target, _autoViewport, _savedProfile, ApplySettings);
         _ = dialog.ShowDialog(_owner);
     }
 
     private void ApplySettings(SceneSettingsValues values)
     {
-        _sendCommand(ViewerCommandCodec.EncodeCameraLens(
-            values.FieldOfView,
-            values.NearClip,
-            values.FarClip,
-            values.OrthographicSize));
+        var profile = new SceneSettingsProfile
+        {
+            FieldOfView = values.FieldOfView,
+            NearClip = values.NearClip,
+            FarClip = values.FarClip,
+            OrthographicSize = values.OrthographicSize,
+            IdleFps = values.IdleFps,
+            InteractiveFps = values.InteractiveFps,
+            AutoViewport = values.AutoViewport,
+            Width = values.Width,
+            Height = values.Height,
+            CullingMode = values.CullingMode,
+            CullingMask = values.CullingMask
+        };
 
-        _autoViewport = values.AutoViewport;
+        _savedProfile = profile;
+        _autoViewport = profile.AutoViewport;
+        if (!string.IsNullOrWhiteSpace(_gameExecutablePath))
+        {
+            SceneSettingsStore.Save(_gameExecutablePath, profile);
+        }
+
+        if (_latestTarget is { } target)
+        {
+            ApplyProfile(profile, target);
+        }
+    }
+
+    private void ApplyProfile(SceneSettingsProfile profile, RenderTargetInfo target)
+    {
+        _sendCommand(ViewerCommandCodec.EncodeCameraLens(
+            profile.FieldOfView,
+            profile.NearClip,
+            profile.FarClip,
+            profile.OrthographicSize));
+
+        _autoViewport = profile.AutoViewport;
         _requestedAutoWidth = 0;
         _requestedAutoHeight = 0;
 
@@ -229,10 +283,10 @@ internal sealed class ScenePanel : Grid
             var rawSize = _sceneHost.Bounds.Size;
             var size = rawSize.Width >= 1 && rawSize.Height >= 1
                 ? NormalizeViewportSize(rawSize)
-                : (_latestTarget?.Width ?? values.Width, _latestTarget?.Height ?? values.Height);
+                : (target.Width, target.Height);
             _sendCommand(ViewerCommandCodec.EncodeCameraStreamSettings(
-                values.IdleFps,
-                values.InteractiveFps,
+                profile.IdleFps,
+                profile.InteractiveFps,
                 size.Item1,
                 size.Item2));
             _requestedAutoWidth = size.Item1;
@@ -242,14 +296,14 @@ internal sealed class ScenePanel : Grid
         {
             _resizeDebounce.Stop();
             _sendCommand(ViewerCommandCodec.EncodeCameraStreamSettings(
-                values.IdleFps,
-                values.InteractiveFps,
-                values.Width,
-                values.Height));
+                profile.IdleFps,
+                profile.InteractiveFps,
+                profile.Width,
+                profile.Height));
         }
 
-        var mask = values.CullingMode == SceneCullingMode.Manual ? values.CullingMask : -1;
-        _sendCommand(ViewerCommandCodec.EncodeCameraCulling(values.CullingMode, mask));
+        var mask = profile.CullingMode == SceneCullingMode.Manual ? profile.CullingMask : -1;
+        _sendCommand(ViewerCommandCodec.EncodeCameraCulling(profile.CullingMode, mask));
     }
 
     private void ScheduleViewportResize(Size size)
@@ -288,8 +342,8 @@ internal sealed class ScenePanel : Grid
         _requestedAutoWidth = size.Width;
         _requestedAutoHeight = size.Height;
         _sendCommand(ViewerCommandCodec.EncodeCameraStreamSettings(
-            target.IdleFps,
-            target.InteractiveFps,
+            _savedProfile?.IdleFps ?? target.IdleFps,
+            _savedProfile?.InteractiveFps ?? target.InteractiveFps,
             size.Width,
             size.Height));
     }
