@@ -16,6 +16,8 @@ public sealed class RenderTargetInfo
     public int Width { get; set; }
     public int Height { get; set; }
     public int DxgiFormat { get; set; }
+    public ulong AdapterLuid { get; set; }
+    public string AdapterName { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
 }
 
