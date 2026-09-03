@@ -13,8 +13,14 @@ public sealed class Plugin : BaseUnityPlugin
     public const string PluginName = "U3D Viewer Agent (Mono)";
     public const string PluginVersion = "0.1.0";
 
+    private const float SnapshotRestartDelay = 1.0f;
+    private const int HierarchyNodesPerFrame = 64;
+    private const double HierarchyScanBudgetMilliseconds = 0.75;
+
     private PipeServer? _pipeServer;
     private SceneCameraController? _sceneCamera;
+    private SceneScanner.SceneScanSession? _sceneScan;
+    private Task<string>? _snapshotSerialization;
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
@@ -33,7 +39,10 @@ public sealed class Plugin : BaseUnityPlugin
         _sceneCamera = new SceneCameraController();
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
+        _sceneScan = null;
+        _snapshotSerialization = null;
         _selectedInstanceId = 0;
+        _nextSnapshotAt = 0f;
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
     }
 
@@ -42,6 +51,9 @@ public sealed class Plugin : BaseUnityPlugin
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
+            _sceneScan = null;
+            _snapshotSerialization = null;
+            _nextSnapshotAt = 0f;
             return;
         }
 
@@ -59,6 +71,8 @@ public sealed class Plugin : BaseUnityPlugin
                 if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
                 {
                     _selectedInstanceId = command.InstanceId;
+                    _sceneScan = null;
+                    _snapshotSerialization = null;
                     _nextSnapshotAt = 0f;
                     continue;
                 }
@@ -72,23 +86,76 @@ public sealed class Plugin : BaseUnityPlugin
         }
 
         _sceneCamera?.TickRender();
+        PublishCompletedSerialization(pipeServer);
 
-        if (Time.unscaledTime < _nextSnapshotAt)
+        if (_snapshotSerialization is not null)
         {
             return;
         }
 
-        _nextSnapshotAt = Time.unscaledTime + 1.0f;
+        var now = Time.unscaledTime;
+        if (_sceneScan is null)
+        {
+            if (now < _nextSnapshotAt)
+            {
+                return;
+            }
+
+            try
+            {
+                _sceneScan = SceneScanner.Begin(++_sequence, _selectedInstanceId);
+            }
+            catch (Exception ex)
+            {
+                _nextSnapshotAt = now + SnapshotRestartDelay;
+                LogSource.LogError($"Failed to start scene scan: {ex}");
+                return;
+            }
+        }
 
         try
         {
-            var snapshot = SceneScanner.Capture(++_sequence, _selectedInstanceId);
+            _sceneScan.ProcessSlice(HierarchyNodesPerFrame, HierarchyScanBudgetMilliseconds);
+            if (!_sceneScan.IsComplete)
+            {
+                return;
+            }
+
+            var snapshot = _sceneScan.Snapshot;
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
-            pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
+            _sceneScan = null;
+            _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+
+            // Snapshot data contains no live Unity objects after the incremental scan completes,
+            // so JSON construction can safely run away from the Unity main thread.
+            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)
         {
-            LogSource.LogError($"Failed to capture scene snapshot: {ex}");
+            _sceneScan = null;
+            _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            LogSource.LogError($"Failed to advance scene scan: {ex}");
+        }
+    }
+
+    private void PublishCompletedSerialization(PipeServer pipeServer)
+    {
+        var task = _snapshotSerialization;
+        if (task is null || !task.IsCompleted)
+        {
+            return;
+        }
+
+        _snapshotSerialization = null;
+        if (task.Status == TaskStatus.RanToCompletion)
+        {
+            pipeServer.Publish(task.Result);
+            return;
+        }
+
+        if (task.IsFaulted)
+        {
+            LogSource.LogError($"Failed to serialize scene snapshot: {task.Exception?.GetBaseException().Message}");
         }
     }
 
@@ -100,6 +167,8 @@ public sealed class Plugin : BaseUnityPlugin
             _runInBackgroundCaptured = false;
         }
 
+        _sceneScan = null;
+        _snapshotSerialization = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
         _pipeServer?.Dispose();
