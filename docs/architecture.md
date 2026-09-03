@@ -11,7 +11,8 @@ U3DViewer.exe
 │  ├─ detect Mono / IL2CPP
 │  ├─ ensure BepInEx 6 x64
 │  ├─ generate IL2CPP interop when required
-│  ├─ build target-specific Agent on demand
+│  ├─ fingerprint target compatibility
+│  ├─ reuse cached Agent OR build/cache once
 │  └─ deploy / launch / wait for Agent
 ├─ Hierarchy
 ├─ Inspector
@@ -33,12 +34,15 @@ After the user selects a game, the Viewer:
 1. detects the Unity backend from the game layout;
 2. installs the pinned BepInEx 6 x64 runtime when BepInEx is absent;
 3. for IL2CPP, launches a temporary bootstrap process when `BepInEx/interop` still needs to be generated;
-4. copies the bundled Agent Builder workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`;
-5. invokes the local .NET SDK with `UnityReferenceDir` pointing at that game's own Unity assemblies;
-6. deploys Agent + Protocol + NativeBridge;
-7. launches/restarts the game and waits for its PID-specific pipe.
+4. computes a compatibility fingerprint from the selected backend, Agent/Protocol builder inputs, and SHA-256 hashes of the Unity assemblies used at compile time;
+5. reuses `%LOCALAPPDATA%/U3DViewer/AgentCache/<backend>/<fingerprint>/` when that profile already exists;
+6. otherwise copies the bundled Agent Builder workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, invokes the local .NET SDK with `UnityReferenceDir`, and stores the resulting Agent + Protocol in the cache;
+7. deploys Agent + Protocol + NativeBridge;
+8. launches/restarts the game and waits for its PID-specific pipe.
 
-Mono compile references come from `<Game>_Data/Managed`. IL2CPP compile references come from `BepInEx/interop`. This keeps Unity-version-specific assemblies outside the Viewer binary and moves compatibility to the thin Agent build boundary.
+Mono compile references come from `<Game>_Data/Managed`. IL2CPP compile references come from `BepInEx/interop`. The cache key is based on compatibility inputs, not the game path, so multiple games can reuse one Agent when their referenced Unity binaries are identical.
+
+The current strategy deliberately prefers exact binary compatibility over blindly treating all Unity versions as ABI-compatible. Mono therefore behaves like a shared compatibility-profile Agent rather than one universal binary across every Unity release. IL2CPP uses the same approach against generated Unity proxy assemblies. Moving more Unity API access behind runtime reflection/compatibility adapters can broaden the Mono reuse boundary later.
 
 A user-selected running game is only asked to close normally. U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process created by U3DViewer itself may be terminated after interop generation.
 
@@ -122,7 +126,8 @@ Initial implementation present:
 - GUI `Attach`, `Prepare + Restart`, and `Open Game...`
 - automatic BepInEx bootstrap when missing
 - automatic IL2CPP interop bootstrap
-- target-specific Agent build on demand
+- on-demand Agent build for a new compatibility profile
+- compatibility-keyed Agent cache/reuse
 - automatic deployment and Agent wait/connect
 
 Still required before M4 is stable:
@@ -151,7 +156,8 @@ Planned:
 - incremental hierarchy updates
 - better IL2CPP component type resolution
 - `DontDestroyOnLoad` / hidden object enumeration
-- packaged/self-contained Agent compiler strategy that does not require a separately installed SDK
+- broader version-agnostic Mono compatibility adapter
+- packaged/self-contained Agent compiler strategy that does not require a separately installed SDK for uncached profiles
 - DX12/Vulkan transport backends after D3D11 is stable
 
 ## Current constraints
