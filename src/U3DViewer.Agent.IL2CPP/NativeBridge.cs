@@ -6,6 +6,9 @@ internal static class NativeBridge
 {
     private const string LibraryName = "U3DViewer.NativeBridge";
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int U3DViewer_GetAbiVersion();
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     internal static extern int U3DViewer_SetSourceTexture(IntPtr nativeTexture, string sharedName);
 
