@@ -17,16 +17,19 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     private readonly Action<string> _sendCommand;
     private readonly Action _focusSelected;
-    private readonly DispatcherTimer _timer = new();
+    private readonly DispatcherTimer _inputTimer = new();
     private readonly DispatcherTimer _resizeRecoveryTimer = new();
+    private readonly object _presenterStateLock = new();
+    private readonly AutoResetEvent _presenterWake = new(false);
+    private readonly ManualResetEventSlim _windowReleased = new(true);
+    private readonly Thread _presenterThread;
 
     private IntPtr _hostWindow;
     private RenderTargetInfo? _target;
     private string _targetKey = string.Empty;
-    private bool _presenterOpen;
-    private int _presentInFlight;
-    private int _resizePending;
-    private DateTime _lastOpenAttemptUtc = DateTime.MinValue;
+    private bool _resizePending;
+    private int _presenterEpoch;
+    private int _shutdownRequested;
     private long _lastTickTimestamp = Stopwatch.GetTimestamp();
     private float _moveSpeed = 10f;
     private string _lastStatus = string.Empty;
@@ -37,9 +40,16 @@ internal sealed class NativeSceneHost : NativeControlHost
         _focusSelected = focusSelected;
         Focusable = true;
 
-        _timer.Interval = TimeSpan.FromMilliseconds(16);
-        _timer.Tick += OnTick;
-        _timer.Start();
+        _presenterThread = new Thread(PresenterLoop)
+        {
+            IsBackground = true,
+            Name = "U3DViewer Scene Presenter"
+        };
+        _presenterThread.Start();
+
+        _inputTimer.Interval = TimeSpan.FromMilliseconds(16);
+        _inputTimer.Tick += OnInputTick;
+        _inputTimer.Start();
 
         _resizeRecoveryTimer.Interval = TimeSpan.FromMilliseconds(300);
         _resizeRecoveryTimer.Tick += OnResizeRecoveryTick;
@@ -55,11 +65,15 @@ internal sealed class NativeSceneHost : NativeControlHost
     {
         if (target is null || !target.Available || string.IsNullOrWhiteSpace(target.SharedName))
         {
-            _target = null;
-            _targetKey = string.Empty;
+            lock (_presenterStateLock)
+            {
+                _target = null;
+                _targetKey = string.Empty;
+                _presenterEpoch++;
+            }
+
             _resizeRecoveryTimer.Stop();
-            Interlocked.Exchange(ref _resizePending, 0);
-            ClosePresenter();
+            _presenterWake.Set();
             SetStatus(target?.Status ?? "Waiting for the target game's Scene render target...");
             return;
         }
@@ -71,29 +85,37 @@ internal sealed class NativeSceneHost : NativeControlHost
         }
 
         var key = $"{target.SharedName}|{target.AdapterLuid:X16}|{target.Width}x{target.Height}|{target.DxgiFormat}";
-        if (!string.Equals(_targetKey, key, StringComparison.Ordinal))
+        lock (_presenterStateLock)
         {
-            ClosePresenter();
-            _targetKey = key;
+            if (!string.Equals(_targetKey, key, StringComparison.Ordinal))
+            {
+                _targetKey = key;
+                _presenterEpoch++;
+            }
+            _target = target;
         }
 
-        _target = target;
-        if (_presenterOpen)
-        {
-            SetLiveStatus(target);
-        }
-        else
-        {
-            TryOpenPresenter(force: true);
-        }
+        _presenterWake.Set();
     }
 
     public void Shutdown()
     {
-        _timer.Stop();
+        _inputTimer.Stop();
         _resizeRecoveryTimer.Stop();
-        Interlocked.Exchange(ref _resizePending, 0);
-        ClosePresenter();
+
+        lock (_presenterStateLock)
+        {
+            _target = null;
+            _resizePending = false;
+            _presenterEpoch++;
+        }
+
+        Interlocked.Exchange(ref _shutdownRequested, 1);
+        _presenterWake.Set();
+        if (_presenterThread.IsAlive)
+        {
+            _presenterThread.Join(TimeSpan.FromSeconds(1));
+        }
     }
 
     protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
@@ -110,20 +132,37 @@ internal sealed class NativeSceneHost : NativeControlHost
             return base.CreateNativeControlCore(parent);
         }
 
-        _hostWindow = handle;
+        lock (_presenterStateLock)
+        {
+            _hostWindow = handle;
+            _resizePending = false;
+            _presenterEpoch++;
+        }
+
+        _windowReleased.Reset();
         _lastTickTimestamp = Stopwatch.GetTimestamp();
-        TryOpenPresenter(force: true);
+        _presenterWake.Set();
         return new SceneHostWindowHandle(handle);
     }
 
     protected override void DestroyNativeControlCore(IPlatformHandle control)
     {
-        if (control.Handle == _hostWindow)
+        if (control.Handle == GetHostWindow())
         {
             _resizeRecoveryTimer.Stop();
-            Interlocked.Exchange(ref _resizePending, 0);
-            ClosePresenter();
-            _hostWindow = IntPtr.Zero;
+            lock (_presenterStateLock)
+            {
+                _hostWindow = IntPtr.Zero;
+                _resizePending = false;
+                _presenterEpoch++;
+            }
+
+            _windowReleased.Reset();
+            _presenterWake.Set();
+            if (_presenterThread.IsAlive)
+            {
+                _windowReleased.Wait(TimeSpan.FromSeconds(1));
+            }
         }
 
         base.DestroyNativeControlCore(control);
@@ -131,12 +170,17 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     private void OnHostSizeChanged(object? sender, SizeChangedEventArgs e)
     {
-        if (_hostWindow == IntPtr.Zero || e.NewSize.Width < 1 || e.NewSize.Height < 1)
+        if (e.NewSize.Width < 1 || e.NewSize.Height < 1 || GetHostWindow() == IntPtr.Zero)
         {
             return;
         }
 
-        Interlocked.Exchange(ref _resizePending, 1);
+        lock (_presenterStateLock)
+        {
+            _resizePending = true;
+        }
+
+        _presenterWake.Set();
         _resizeRecoveryTimer.Stop();
         _resizeRecoveryTimer.Start();
     }
@@ -145,154 +189,160 @@ internal sealed class NativeSceneHost : NativeControlHost
     {
         _resizeRecoveryTimer.Stop();
 
-        if (_hostWindow == IntPtr.Zero || _target is null)
+        lock (_presenterStateLock)
         {
-            Interlocked.Exchange(ref _resizePending, 0);
-            return;
+            if (_hostWindow == IntPtr.Zero || _target is null)
+            {
+                _resizePending = false;
+                return;
+            }
+
+            _resizePending = false;
+            _presenterEpoch++;
         }
 
-        // Never tear down the native presenter while a background Present call is still inside it.
-        // A queued-but-not-started Present observes _resizePending and exits without touching DXGI.
-        if (Volatile.Read(ref _presentInFlight) != 0)
-        {
-            _resizeRecoveryTimer.Start();
-            return;
-        }
-
-        ClosePresenter();
-        Interlocked.Exchange(ref _resizePending, 0);
-        TryOpenPresenter(force: true);
-        if (_presenterOpen)
-        {
-            QueuePresent();
-        }
+        _presenterWake.Set();
     }
 
-    private void OnTick(object? sender, EventArgs e)
+    private void OnInputTick(object? sender, EventArgs e)
     {
         var nowTimestamp = Stopwatch.GetTimestamp();
         var deltaSeconds = (float)((nowTimestamp - _lastTickTimestamp) / (double)Stopwatch.Frequency);
         _lastTickTimestamp = nowTimestamp;
         deltaSeconds = Math.Clamp(deltaSeconds, 0f, 0.1f);
 
-        if (_hostWindow == IntPtr.Zero)
+        var window = GetHostWindow();
+        if (window != IntPtr.Zero)
         {
-            return;
+            PollInput(window, deltaSeconds);
         }
-
-        if (!_presenterOpen && _target is not null && Volatile.Read(ref _resizePending) == 0)
-        {
-            TryOpenPresenter(force: false);
-        }
-
-        if (_presenterOpen && Volatile.Read(ref _resizePending) == 0)
-        {
-            QueuePresent();
-        }
-
-        PollInput(deltaSeconds);
     }
 
-    private void QueuePresent()
+    private void PresenterLoop()
     {
-        var window = _hostWindow;
-        if (window == IntPtr.Zero || !_presenterOpen || Volatile.Read(ref _resizePending) != 0 ||
-            Interlocked.CompareExchange(ref _presentInFlight, 1, 0) != 0)
-        {
-            return;
-        }
-
-        _ = Task.Run(() =>
-        {
-            var presentResult = 0;
-            var hresult = 0;
-            Exception? failure = null;
-
-            try
-            {
-                if (Volatile.Read(ref _resizePending) != 0)
-                {
-                    return;
-                }
-
-                presentResult = U3DViewer_PresentScene(window);
-                if (presentResult < 0)
-                {
-                    hresult = U3DViewer_GetScenePresenterLastError(window);
-                }
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _presentInFlight, 0);
-            }
-
-            if (presentResult >= 0 && failure is null)
-            {
-                return;
-            }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (window != _hostWindow || !_presenterOpen)
-                {
-                    return;
-                }
-
-                if (failure is not null)
-                {
-                    SetStatus($"Scene GPU presentation failed: {failure.Message}. Retrying...");
-                    ViewerLog.Error("Scene GPU presentation threw an exception.", failure);
-                }
-                else
-                {
-                    SetStatus($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}). Retrying...");
-                    ViewerLog.Error($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}).");
-                }
-                ClosePresenter();
-            });
-        });
-    }
-
-    private void TryOpenPresenter(bool force)
-    {
-        var target = _target;
-        if (_hostWindow == IntPtr.Zero || target is null || _presenterOpen || Volatile.Read(ref _resizePending) != 0)
-        {
-            return;
-        }
-
-        var now = DateTime.UtcNow;
-        if (!force && now - _lastOpenAttemptUtc < TimeSpan.FromMilliseconds(250))
-        {
-            return;
-        }
-        _lastOpenAttemptUtc = now;
+        IntPtr openedWindow = IntPtr.Zero;
+        string openedKey = string.Empty;
+        var openedEpoch = -1;
+        var presenterOpen = false;
+        var nextOpenAttemptUtc = DateTime.MinValue;
 
         try
         {
-            var opened = U3DViewer_OpenScenePresenter(_hostWindow, target.SharedName, target.AdapterLuid);
-            var presenterLuid = U3DViewer_GetScenePresenterAdapterLuid(_hostWindow);
-            var presenterName = GetPresenterAdapterName();
+            while (Volatile.Read(ref _shutdownRequested) == 0)
+            {
+                _presenterWake.WaitOne(16);
+                if (Volatile.Read(ref _shutdownRequested) != 0)
+                {
+                    break;
+                }
+
+                SnapshotPresenterState(
+                    out var requestedWindow,
+                    out var target,
+                    out var requestedKey,
+                    out var resizePending,
+                    out var requestedEpoch);
+
+                if (requestedWindow == IntPtr.Zero || target is null || resizePending)
+                {
+                    if (presenterOpen)
+                    {
+                        ClosePresenterNative(openedWindow);
+                        presenterOpen = false;
+                        openedWindow = IntPtr.Zero;
+                        openedKey = string.Empty;
+                        openedEpoch = -1;
+                    }
+
+                    if (requestedWindow == IntPtr.Zero)
+                    {
+                        _windowReleased.Set();
+                    }
+                    continue;
+                }
+
+                _windowReleased.Reset();
+
+                if (presenterOpen &&
+                    (openedWindow != requestedWindow ||
+                     !string.Equals(openedKey, requestedKey, StringComparison.Ordinal) ||
+                     openedEpoch != requestedEpoch))
+                {
+                    ClosePresenterNative(openedWindow);
+                    presenterOpen = false;
+                    openedWindow = IntPtr.Zero;
+                    openedKey = string.Empty;
+                    openedEpoch = -1;
+                }
+
+                if (!presenterOpen)
+                {
+                    var now = DateTime.UtcNow;
+                    if (now < nextOpenAttemptUtc)
+                    {
+                        continue;
+                    }
+
+                    presenterOpen = TryOpenPresenterNative(requestedWindow, target);
+                    if (!presenterOpen)
+                    {
+                        nextOpenAttemptUtc = now + TimeSpan.FromMilliseconds(250);
+                        continue;
+                    }
+
+                    openedWindow = requestedWindow;
+                    openedKey = requestedKey;
+                    openedEpoch = requestedEpoch;
+                    nextOpenAttemptUtc = DateTime.MinValue;
+                }
+
+                var presentResult = PresentNative(openedWindow);
+                if (presentResult >= 0)
+                {
+                    continue;
+                }
+
+                ClosePresenterNative(openedWindow);
+                presenterOpen = false;
+                openedWindow = IntPtr.Zero;
+                openedKey = string.Empty;
+                openedEpoch = -1;
+                nextOpenAttemptUtc = DateTime.UtcNow + TimeSpan.FromMilliseconds(250);
+            }
+        }
+        finally
+        {
+            if (presenterOpen && openedWindow != IntPtr.Zero)
+            {
+                ClosePresenterNative(openedWindow);
+            }
+            _windowReleased.Set();
+        }
+    }
+
+    private bool TryOpenPresenterNative(IntPtr window, RenderTargetInfo target)
+    {
+        try
+        {
+            var opened = U3DViewer_OpenScenePresenter(window, target.SharedName, target.AdapterLuid);
+            var presenterLuid = U3DViewer_GetScenePresenterAdapterLuid(window);
+            var presenterName = GetPresenterAdapterName(window);
             var gameGpu = FormatAdapter(target.AdapterName, target.AdapterLuid);
             var viewerGpu = FormatAdapter(presenterName, presenterLuid);
 
             if (opened == 0)
             {
-                var hresult = U3DViewer_GetScenePresenterLastError(_hostWindow);
-                var stage = DescribeInitStage(U3DViewer_GetScenePresenterInitStage(_hostWindow));
+                var hresult = U3DViewer_GetScenePresenterLastError(window);
+                var stage = DescribeInitStage(U3DViewer_GetScenePresenterInitStage(window));
                 SetStatus(
                     $"Could not open GPU Scene presenter at {stage} (HRESULT 0x{hresult:X8}, source DXGI {target.DxgiFormat}). " +
                     $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
-                return;
+                return false;
             }
 
-            _presenterOpen = true;
             SetLiveStatus(target);
             ViewerLog.Info($"Scene zero-copy presenter opened. Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
+            return true;
         }
         catch (EntryPointNotFoundException ex)
         {
@@ -309,6 +359,73 @@ internal sealed class NativeSceneHost : NativeControlHost
             SetStatus($"Opening zero-copy Scene presenter failed: {ex.Message}");
             ViewerLog.Error("Opening zero-copy Scene presenter failed.", ex);
         }
+
+        return false;
+    }
+
+    private int PresentNative(IntPtr window)
+    {
+        try
+        {
+            var result = U3DViewer_PresentScene(window);
+            if (result >= 0)
+            {
+                return result;
+            }
+
+            var hresult = U3DViewer_GetScenePresenterLastError(window);
+            SetStatus($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}). Retrying...");
+            ViewerLog.Error($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}).");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Scene GPU presentation failed: {ex.Message}. Retrying...");
+            ViewerLog.Error("Scene GPU presentation threw an exception.", ex);
+        }
+
+        return -1;
+    }
+
+    private static void ClosePresenterNative(IntPtr window)
+    {
+        if (window == IntPtr.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            U3DViewer_CloseScenePresenter(window);
+        }
+        catch
+        {
+            // The native child may already be going away during window shutdown.
+        }
+    }
+
+    private void SnapshotPresenterState(
+        out IntPtr window,
+        out RenderTargetInfo? target,
+        out string targetKey,
+        out bool resizePending,
+        out int epoch)
+    {
+        lock (_presenterStateLock)
+        {
+            window = _hostWindow;
+            target = _target;
+            targetKey = _targetKey;
+            resizePending = _resizePending;
+            epoch = _presenterEpoch;
+        }
+    }
+
+    private IntPtr GetHostWindow()
+    {
+        lock (_presenterStateLock)
+        {
+            return _hostWindow;
+        }
     }
 
     private void SetLiveStatus(RenderTargetInfo target)
@@ -318,9 +435,9 @@ internal sealed class NativeSceneHost : NativeControlHost
             "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus");
     }
 
-    private void PollInput(float deltaSeconds)
+    private void PollInput(IntPtr window, float deltaSeconds)
     {
-        if (U3DViewer_PollSceneInput(_hostWindow, out var input) == 0)
+        if (U3DViewer_PollSceneInput(window, out var input) == 0)
         {
             return;
         }
@@ -374,33 +491,22 @@ internal sealed class NativeSceneHost : NativeControlHost
         _sendCommand(ViewerCommandCodec.EncodeCameraMove(forward, right, up, deltaSeconds));
     }
 
-    private void ClosePresenter()
-    {
-        var wasOpen = _presenterOpen;
-        _presenterOpen = false;
-        if (_hostWindow != IntPtr.Zero && wasOpen)
-        {
-            try
-            {
-                U3DViewer_CloseScenePresenter(_hostWindow);
-            }
-            catch
-            {
-                // The native child may already be going away during window shutdown.
-            }
-        }
-    }
-
-    private string GetPresenterAdapterName()
+    private string GetPresenterAdapterName(IntPtr window)
     {
         var name = new StringBuilder(256);
-        return U3DViewer_GetScenePresenterAdapterName(_hostWindow, name, name.Capacity) != 0
+        return U3DViewer_GetScenePresenterAdapterName(window, name, name.Capacity) != 0
             ? name.ToString()
             : string.Empty;
     }
 
     private void SetStatus(string status)
     {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(() => SetStatus(status));
+            return;
+        }
+
         if (string.Equals(_lastStatus, status, StringComparison.Ordinal))
         {
             return;
