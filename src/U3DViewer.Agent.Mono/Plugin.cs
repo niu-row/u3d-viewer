@@ -16,6 +16,7 @@ public sealed class Plugin : BaseUnityPlugin
     private SceneCameraController? _sceneCamera;
     private float _nextSnapshotAt;
     private long _sequence;
+    private int _selectedInstanceId;
 
     private ManualLogSource LogSource => Logger;
 
@@ -25,6 +26,7 @@ public sealed class Plugin : BaseUnityPlugin
         _sceneCamera = new SceneCameraController();
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
+        _selectedInstanceId = 0;
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}");
     }
 
@@ -40,6 +42,13 @@ public sealed class Plugin : BaseUnityPlugin
         {
             try
             {
+                if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
+                {
+                    _selectedInstanceId = command.InstanceId;
+                    _nextSnapshotAt = 0f;
+                    continue;
+                }
+
                 _sceneCamera?.Apply(command);
             }
             catch (Exception ex)
@@ -59,7 +68,7 @@ public sealed class Plugin : BaseUnityPlugin
 
         try
         {
-            var snapshot = SceneScanner.Capture(++_sequence);
+            var snapshot = SceneScanner.Capture(++_sequence, _selectedInstanceId);
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
         }
