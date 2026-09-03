@@ -19,6 +19,7 @@ internal sealed class SceneCameraController : IDisposable
     private float _moveSpeed = 10f;
     private float _nextRenderAt;
     private float _interactiveUntil;
+    private bool _cameraRenderPending;
     private bool _bridgeReady;
     private IntPtr _renderEvent;
     private int _copyEventId;
@@ -26,6 +27,7 @@ internal sealed class SceneCameraController : IDisposable
     private ulong _adapterLuid;
     private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
+    private string _sourceCameraName = string.Empty;
     private string _renderStatus = "Scene Camera has not initialized yet.";
 
     public void Apply(ViewerCommand command)
@@ -83,24 +85,43 @@ internal sealed class SceneCameraController : IDisposable
     public void TickRender()
     {
         EnsureCamera();
-        var now = Time.unscaledTime;
-        if (!_bridgeReady || _camera is null || now < _nextRenderAt)
+        var camera = _camera;
+        if (!_bridgeReady || camera is null)
         {
             return;
         }
 
-        var interval = now < _interactiveUntil
-            ? InteractiveRenderInterval
-            : IdleRenderInterval;
-        _nextRenderAt = now + interval;
-
         try
         {
-            _camera.Render();
-            GL.IssuePluginEvent(_renderEvent, _copyEventId);
+            // Camera.Render() bypasses/does not reliably participate in SRP (URP/HDRP).
+            // Pulse Camera.enabled for one normal Unity render-loop frame instead. On the
+            // following Update the RenderTexture contains a fully completed frame, so the
+            // native copy event can safely publish it to the Viewer.
+            if (_cameraRenderPending)
+            {
+                camera.enabled = false;
+                GL.IssuePluginEvent(_renderEvent, _copyEventId);
+                _cameraRenderPending = false;
+            }
+
+            var now = Time.unscaledTime;
+            if (now < _nextRenderAt)
+            {
+                return;
+            }
+
+            var interval = now < _interactiveUntil
+                ? InteractiveRenderInterval
+                : IdleRenderInterval;
+            _nextRenderAt = now + interval;
+
+            camera.enabled = true;
+            _cameraRenderPending = true;
         }
         catch (Exception ex)
         {
+            camera.enabled = false;
+            _cameraRenderPending = false;
             _bridgeReady = false;
             _renderStatus = $"Scene render failed: {ex.Message}";
         }
@@ -185,7 +206,7 @@ internal sealed class SceneCameraController : IDisposable
             _adapterName = SystemInfo.graphicsDeviceName ?? string.Empty;
             _bridgeReady = _renderEvent != IntPtr.Zero;
             _renderStatus = _bridgeReady
-                ? $"D3D11 shared Scene render target is ready on {DisplayAdapterName(_adapterName)}."
+                ? $"D3D11 shared Scene target ready on {DisplayAdapterName(_adapterName)}. Source Camera: {DisplayCameraName(_sourceCameraName)}. Unity render-loop capture."
                 : "NativeBridge did not return a render event callback.";
         }
         catch (DllNotFoundException)
@@ -212,6 +233,9 @@ internal sealed class SceneCameraController : IDisposable
     private static string DisplayAdapterName(string value) =>
         string.IsNullOrWhiteSpace(value) ? "an unknown GPU" : value;
 
+    private static string DisplayCameraName(string value) =>
+        string.IsNullOrWhiteSpace(value) ? "fallback camera" : value;
+
     private void CopyFromGameCamera()
     {
         var camera = _camera;
@@ -221,14 +245,17 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         camera.orthographic = false;
-        var source = Camera.main;
-        if (source is null || source == camera)
+        var source = FindSourceCamera(camera);
+        if (source is null)
         {
+            _sourceCameraName = string.Empty;
             camera.transform.position = new Vector3(0f, 2f, -5f);
             camera.transform.rotation = Quaternion.identity;
+            camera.cullingMask = -1;
             return;
         }
 
+        _sourceCameraName = source.name ?? source.gameObject.name ?? string.Empty;
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
         camera.fieldOfView = source.fieldOfView;
@@ -237,6 +264,46 @@ internal sealed class SceneCameraController : IDisposable
         camera.clearFlags = source.clearFlags;
         camera.backgroundColor = source.backgroundColor;
         camera.cullingMask = source.cullingMask;
+        camera.depth = source.depth;
+    }
+
+    private static Camera? FindSourceCamera(Camera viewerCamera)
+    {
+        var main = Camera.main;
+        if (main is not null && main != viewerCamera && main.enabled && main.gameObject.activeInHierarchy)
+        {
+            return main;
+        }
+
+        Camera? best = null;
+        var bestDepth = float.PositiveInfinity;
+        var cameras = Camera.allCameras;
+
+        for (var index = 0; index < cameras.Length; index++)
+        {
+            var candidate = cameras[index];
+            if (candidate is null || candidate == viewerCamera || !candidate.enabled || !candidate.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            // Prefer a normal display camera over cameras already rendering into a texture.
+            if (candidate.targetTexture is null)
+            {
+                if (best is null || best.targetTexture is not null || candidate.depth < bestDepth)
+                {
+                    best = candidate;
+                    bestDepth = candidate.depth;
+                }
+            }
+            else if (best is null)
+            {
+                best = candidate;
+                bestDepth = candidate.depth;
+            }
+        }
+
+        return best;
     }
 
     private void Focus(Vector3 target)
@@ -311,8 +378,11 @@ internal sealed class SceneCameraController : IDisposable
 
         if (_camera is not null)
         {
+            _camera.enabled = false;
             _camera.targetTexture = null;
         }
+
+        _cameraRenderPending = false;
 
         if (_renderTexture is not null)
         {
