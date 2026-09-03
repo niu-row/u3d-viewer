@@ -154,14 +154,24 @@ internal static class GameAutomation
 
             File.Copy(agentPath, Path.Combine(pluginDirectory, Path.GetFileName(agentPath)), overwrite: true);
             File.Copy(protocolPath, Path.Combine(pluginDirectory, "U3DViewer.Protocol.dll"), overwrite: true);
+
+            var nativeBridgeSource = GetNativeBridgeSourcePath(architecture);
+            // Keep the bridge next to the executable for Unity/native-plugin compatibility,
+            // and also place it next to the managed Agent. Legacy Unity Mono runtimes do
+            // not consistently include the executable directory when resolving a bare
+            // DllImport from an assembly loaded out of BepInEx/plugins.
             File.Copy(
-                GetNativeBridgeSourcePath(architecture),
+                nativeBridgeSource,
                 Path.Combine(gameDirectory, "U3DViewer.NativeBridge.dll"),
+                overwrite: true);
+            File.Copy(
+                nativeBridgeSource,
+                Path.Combine(pluginDirectory, "U3DViewer.NativeBridge.dll"),
                 overwrite: true);
 
             return new GameAutomationResult(
                 true,
-                $"Installed {backend} Agent and {architecture} NativeBridge into {pluginDirectory}.");
+                $"Installed {backend} Agent and {architecture} NativeBridge into {pluginDirectory} and the game directory.");
         }
         catch (UnauthorizedAccessException ex)
         {
