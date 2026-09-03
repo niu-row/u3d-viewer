@@ -7,6 +7,7 @@
     <UnityReferenceDir Condition="'$(UnityReferenceDir)' == ''">$(MSBuildProjectDirectory)\lib</UnityReferenceDir>
     <UnityCoreReference Condition="'$(UnityCoreReference)' == ''">$(UnityReferenceDir)\UnityEngine.CoreModule.dll</UnityCoreReference>
     <UnitySceneReference Condition="'$(UnitySceneReference)' == ''">$(UnityReferenceDir)\UnityEngine.SceneManagementModule.dll</UnitySceneReference>
+    <Il2CppMscorlibReference Condition="'$(Il2CppMscorlibReference)' == ''">$(UnityReferenceDir)\Il2Cppmscorlib.dll</Il2CppMscorlibReference>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2CppMscorlibReference)</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.Core">
       <HintPath>$(UnityCoreReference)</HintPath>
       <Private>false</Private>
