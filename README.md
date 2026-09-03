@@ -29,4 +29,9 @@ Phase 0/1: prove the runtime data path before adding 3D rendering.
 - Standalone console viewer first
 - Avalonia UI and D3D11 Scene View after the data path is stable
 
-See `docs/architecture.md` and `docs/getting-started.md` after the bootstrap branch is merged.
+## Start here
+
+- `docs/getting-started.md` — build and first runtime test
+- `docs/architecture.md` — target architecture and milestones
+
+The current bootstrap lives in PR #1 until the first runtime hierarchy path is validated.
