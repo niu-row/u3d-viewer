@@ -21,6 +21,7 @@ public enum ViewerCommandKind
     CameraCullingMask,
     CameraFollowTransform,
     CameraSource,
+    CameraSourceCapture,
     CameraReset,
     CameraRecover,
     CameraVisibility,
@@ -104,6 +105,9 @@ public static class ViewerCommandCodec
 
     public static string EncodeCameraSource(int instanceId) =>
         Join("camera.source", instanceId.ToString(CultureInfo.InvariantCulture));
+
+    public static string EncodeCameraSourceCapture(bool enabled) =>
+        Join("camera.sourceCapture", enabled ? "1" : "0");
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -230,6 +234,13 @@ public static class ViewerCommandCodec
                 command = new ViewerCommand(
                     ViewerCommandKind.CameraSource,
                     instanceId: sourceCameraInstanceId);
+                return true;
+
+            case "camera.sourceCapture" when parts.Length == 2 &&
+                (parts[1] == "0" || parts[1] == "1"):
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraSourceCapture,
+                    flag: parts[1] == "1");
                 return true;
 
             case "camera.reset" when parts.Length == 1:
