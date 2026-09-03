@@ -35,10 +35,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
     {
         _pipeName = ViewerSession.Target?.PipeName
             ?? throw new InvalidOperationException("No Unity process was selected before creating ViewerConnection.");
-        Active = this;
     }
-
-    internal static ViewerConnection? Active { get; private set; }
 
     public event Action<ConnectionState>? StateChanged;
     public event Action<SceneSnapshot>? SnapshotReceived;
@@ -210,11 +207,6 @@ internal sealed class ViewerConnection : IAsyncDisposable
             catch (OperationCanceledException)
             {
             }
-        }
-
-        if (ReferenceEquals(Active, this))
-        {
-            Active = null;
         }
 
         _shutdown.Dispose();
