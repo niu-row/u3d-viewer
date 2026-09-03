@@ -36,7 +36,7 @@ After the user selects a game, the Viewer:
 3. for IL2CPP, launches a temporary bootstrap process when `BepInEx/interop` still needs to be generated;
 4. computes a compatibility fingerprint from the selected backend, Agent/Protocol builder inputs, and SHA-256 hashes of the Unity assemblies used at compile time;
 5. reuses `%LOCALAPPDATA%/U3DViewer/AgentCache/<backend>/<fingerprint>/` when that profile already exists;
-6. otherwise copies the bundled Agent Builder workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, invokes the local .NET SDK with `UnityReferenceDir`, and stores the resulting Agent + Protocol in the cache;
+6. otherwise copies the bundled Agent Builder workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, invokes the local .NET SDK with dynamically resolved Unity references, and stores the resulting Agent + Protocol in the cache;
 7. deploys Agent + Protocol + NativeBridge;
 8. launches/restarts the game and waits for its PID-specific pipe.
 
@@ -83,22 +83,60 @@ Target game
   SceneCamera.Render()
     -> RenderTexture 1280x720 ARGB32
     -> GetNativeTexturePtr()
-    -> U3DViewer.NativeBridge
+    -> U3DViewer.NativeBridge writer
+    -> GPU CopyResource into named shared Texture2D
     -> D3D11_RESOURCE_MISC_SHARED_NTHANDLE
-    -> IDXGIKeyedMutex
+    -> IDXGIKeyedMutex (writer key 0 -> 1)
 
+Named resource + adapter LUID
+              |
+              v
 Viewer
+  Avalonia NativeControlHost
+    -> Win32 child HWND
+    -> D3D11 device created on the same DXGI adapter LUID
     -> OpenSharedResourceByName
-    -> keyed mutex acquire
-    -> CopyResource to staging texture
-    -> Map
-    -> Avalonia WriteableBitmap
-    -> Scene View
+    -> IDXGIKeyedMutex (reader key 1 -> 0)
+    -> pixel shader samples shared texture directly
+       - performs Unity RenderTexture Y flip
+       - preserves source aspect ratio / letterboxes
+    -> flip-model HWND swap chain
+    -> Present
 ```
 
-The named shared resource avoids transmitting a process-local HANDLE through the control protocol. `SceneSnapshot.RenderTarget` publishes the shared resource name, dimensions, DXGI format and current bridge status.
+There is no active GPU-to-CPU staging readback or `WriteableBitmap` Scene path. The Viewer-side pixel path remains on the GPU after the shared resource is opened.
 
-The staging readback is a correctness-first implementation. The long-term Viewer should consume the shared GPU texture directly.
+The named shared resource avoids transmitting a process-local HANDLE through the control protocol. `SceneSnapshot.RenderTarget` publishes the shared resource name, dimensions, DXGI format, source adapter LUID/name and current bridge status. The writer keeps the named NT handle alive for the lifetime of the shared resource.
+
+## Scene input path
+
+The embedded Scene HWND receives native Win32 input directly:
+
+```text
+RMB
+  -> capture native child HWND
+  -> hide cursor while looking
+  -> Raw Input mouse deltas
+  -> camera.look
+
+RMB + WASD/QE
+  -> key state sampled at ~60 Hz
+  -> normalized movement vector
+  -> camera.move
+
+Shift
+  -> temporary movement boost
+
+Mouse wheel
+  -> camera.speed
+
+F
+  -> camera.focus
+```
+
+This avoids keyboard auto-repeat and removes the pointer-edge limitation of an Avalonia-only mouse-drag implementation.
+
+The Agent Scene Camera renders at about 30 FPS while idle. Move/look/focus/projection interaction temporarily boosts the source render toward 60 FPS for responsive navigation, then falls back to the idle rate to reduce the extra `Camera.Render()` cost imposed on the game.
 
 ## Milestones
 
@@ -110,19 +148,24 @@ Implemented foundations:
 - shared runtime-neutral protocol
 - Runtime Hierarchy and Inspector
 - PID-specific duplex Named Pipe
-- isolated Scene Camera and keyboard controls
+- isolated Scene Camera
 - startup process picker
 
 ### M4 — D3D11 Scene transport and automated preparation
 
-Initial implementation present:
+Current implementation:
 
 - runtime RenderTexture
 - native shared D3D11 Texture2D
-- named NT shared resource
+- named NT shared resource with retained writer handle
 - keyed-mutex synchronization
-- Viewer shared-resource reader
-- staging readback into Avalonia Scene View
+- source/Viewer DXGI adapter LUID matching
+- embedded Win32 Scene HWND via Avalonia `NativeControlHost`
+- Viewer-side GPU shader presentation with no CPU readback
+- GPU-side Y flip
+- aspect-preserving presentation
+- Raw Input Scene fly camera controls
+- idle 30 FPS / interactive 60 FPS Scene Camera scheduling
 - GUI `Attach`, `Prepare + Restart`, and `Open Game...`
 - automatic BepInEx bootstrap when missing
 - automatic IL2CPP interop bootstrap
@@ -130,14 +173,13 @@ Initial implementation present:
 - compatibility-keyed Agent cache/reuse
 - automatic deployment and Agent wait/connect
 
-Still required before M4 is stable:
+Still required before M4 is considered broadly hardened:
 
-- real Mono runtime validation
-- real IL2CPP runtime validation
-- broader Unity-version compatibility testing
-- resize negotiation
-- device-loss/recreation recovery
-- direct GPU presentation instead of staging readback
+- real Mono runtime validation across multiple Unity generations
+- broader IL2CPP/Unity-version compatibility testing
+- device-loss / keyed-mutex abandonment recovery testing
+- render-target resolution negotiation instead of fixed 1280x720 source rendering
+- hybrid-GPU and driver matrix validation beyond adapter-LUID matching
 
 ### M5 — scene tools
 
