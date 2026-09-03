@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
@@ -24,11 +25,20 @@ public sealed class Plugin : BaseUnityPlugin
     private PipeServer? _pipeServer;
     private SceneCameraController? _sceneCamera;
     private SceneScanner.SceneScanSession? _sceneScan;
-    private Task<string>? _snapshotSerialization;
+    private Task<SerializedSnapshot>? _snapshotSerialization;
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
     private bool _interactiveHierarchyRefresh;
+    private int _currentScanNodes;
+    private double _currentScanMs;
+    private double _lastScanMs;
+    private double _averageScanMs;
+    private double _maxScanMs;
+    private long _scanSamples;
+    private int _lastScanNodes;
+    private double _lastSerializeMs;
+    private int _lastSnapshotBytes;
     private bool _originalRunInBackground;
     private bool _runInBackgroundCaptured;
 
@@ -50,6 +60,7 @@ public sealed class Plugin : BaseUnityPlugin
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
         _interactiveHierarchyRefresh = false;
+        ResetPerformanceMetrics();
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
     }
 
@@ -122,6 +133,8 @@ public sealed class Plugin : BaseUnityPlugin
 
             try
             {
+                _currentScanNodes = 0;
+                _currentScanMs = 0;
                 _sceneScan = SceneScanner.Begin(
                     ++_sequence,
                     _selectedInstanceId,
@@ -145,25 +158,37 @@ public sealed class Plugin : BaseUnityPlugin
                 ? InteractiveHierarchyScanBudgetMilliseconds
                 : HierarchyScanBudgetMilliseconds;
 
-            _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
+            var scanStarted = Stopwatch.GetTimestamp();
+            var processed = _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
+            _currentScanNodes += processed;
+            _currentScanMs += ElapsedMilliseconds(scanStarted);
+
             if (!_sceneScan.IsComplete)
             {
                 return;
             }
 
+            RecordHierarchyScan(_currentScanNodes, _currentScanMs);
+
             var snapshot = _sceneScan.Snapshot;
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
+            snapshot.Performance = BuildPerformanceInfo();
+            _sceneCamera?.PopulatePerformance(snapshot.Performance);
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
             _interactiveHierarchyRefresh = false;
+            _currentScanNodes = 0;
+            _currentScanMs = 0;
 
-            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
+            _snapshotSerialization = Task.Run(() => SerializeSnapshot(snapshot));
         }
         catch (Exception ex)
         {
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
             _interactiveHierarchyRefresh = false;
+            _currentScanNodes = 0;
+            _currentScanMs = 0;
             LogSource.LogError($"Failed to advance scene scan: {ex}");
         }
     }
@@ -179,7 +204,10 @@ public sealed class Plugin : BaseUnityPlugin
         _snapshotSerialization = null;
         if (task.Status == TaskStatus.RanToCompletion)
         {
-            pipeServer.Publish(task.Result);
+            var result = task.Result;
+            _lastSerializeMs = result.SerializeMs;
+            _lastSnapshotBytes = result.Bytes;
+            pipeServer.Publish(result.Json);
             return;
         }
 
@@ -189,10 +217,42 @@ public sealed class Plugin : BaseUnityPlugin
         }
     }
 
+    private static SerializedSnapshot SerializeSnapshot(SceneSnapshot snapshot)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var json = JsonSnapshotWriter.Write(snapshot);
+        var serializeMs = ElapsedMilliseconds(started);
+        return new SerializedSnapshot(json, Encoding.UTF8.GetByteCount(json), serializeMs);
+    }
+
+    private PerformanceInfo BuildPerformanceInfo() => new()
+    {
+        HierarchyNodes = _lastScanNodes,
+        HierarchyScanMs = _lastScanMs,
+        HierarchyScanAverageMs = _averageScanMs,
+        HierarchyScanMaxMs = _maxScanMs,
+        SnapshotSerializeMs = _lastSerializeMs,
+        SnapshotBytes = _lastSnapshotBytes
+    };
+
+    private void RecordHierarchyScan(int nodes, double milliseconds)
+    {
+        _lastScanNodes = nodes;
+        _lastScanMs = milliseconds;
+        _scanSamples++;
+        _averageScanMs += (milliseconds - _averageScanMs) / _scanSamples;
+        _maxScanMs = Math.Max(_maxScanMs, milliseconds);
+    }
+
+    private static double ElapsedMilliseconds(long started) =>
+        (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
+
     private void RestartHierarchyScan()
     {
         _sceneScan = null;
         _snapshotSerialization = null;
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
         _nextSnapshotAt = 0f;
     }
 
@@ -200,6 +260,21 @@ public sealed class Plugin : BaseUnityPlugin
     {
         _sceneScan = null;
         _snapshotSerialization = null;
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
+    }
+
+    private void ResetPerformanceMetrics()
+    {
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
+        _lastScanMs = 0;
+        _averageScanMs = 0;
+        _maxScanMs = 0;
+        _scanSamples = 0;
+        _lastScanNodes = 0;
+        _lastSerializeMs = 0;
+        _lastSnapshotBytes = 0;
     }
 
     private void OnDestroy()
@@ -217,5 +292,19 @@ public sealed class Plugin : BaseUnityPlugin
         _sceneCamera = null;
         _pipeServer?.Dispose();
         _pipeServer = null;
+    }
+
+    private sealed class SerializedSnapshot
+    {
+        public SerializedSnapshot(string json, int bytes, double serializeMs)
+        {
+            Json = json;
+            Bytes = bytes;
+            SerializeMs = serializeMs;
+        }
+
+        public string Json { get; }
+        public int Bytes { get; }
+        public double SerializeMs { get; }
     }
 }
