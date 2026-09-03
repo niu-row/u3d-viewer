@@ -194,14 +194,14 @@ namespace
                 }
             }
 
-            if (!selectedAdapter)
+            if (selectedAdapter.Get() == nullptr)
             {
                 return DXGI_ERROR_NOT_FOUND;
             }
         }
 
         D3D_FEATURE_LEVEL featureLevel{};
-        const D3D_DRIVER_TYPE driverType = selectedAdapter
+        const D3D_DRIVER_TYPE driverType = selectedAdapter.Get() != nullptr
             ? D3D_DRIVER_TYPE_UNKNOWN
             : D3D_DRIVER_TYPE_HARDWARE;
 
