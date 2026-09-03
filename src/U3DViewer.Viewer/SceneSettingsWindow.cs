@@ -39,11 +39,15 @@ internal sealed class SceneSettingsWindow : Window
 
     private int _manualMask;
 
-    public SceneSettingsWindow(RenderTargetInfo target, bool autoViewport, Action<SceneSettingsValues> apply)
+    public SceneSettingsWindow(
+        RenderTargetInfo target,
+        bool autoViewport,
+        SceneSettingsProfile? savedProfile,
+        Action<SceneSettingsValues> apply)
     {
         _apply = apply;
         _layerNames = target.LayerNames ?? Array.Empty<string>();
-        _manualMask = target.CullingMask;
+        _manualMask = savedProfile?.CullingMask ?? target.CullingMask;
 
         Title = L("Scene Settings", "场景设置");
         Width = 520;
@@ -52,14 +56,14 @@ internal sealed class SceneSettingsWindow : Window
         MinHeight = 520;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
-        _fovBox = CreateValueBox(target.FieldOfView);
-        _nearBox = CreateValueBox(target.NearClipPlane);
-        _farBox = CreateValueBox(target.FarClipPlane);
-        _orthoSizeBox = CreateValueBox(target.OrthographicSize);
-        _idleFpsBox = CreateValueBox(target.IdleFps);
-        _activeFpsBox = CreateValueBox(target.InteractiveFps);
-        _widthBox = CreateValueBox(target.Width);
-        _heightBox = CreateValueBox(target.Height);
+        _fovBox = CreateValueBox(savedProfile?.FieldOfView ?? target.FieldOfView);
+        _nearBox = CreateValueBox(savedProfile?.NearClip ?? target.NearClipPlane);
+        _farBox = CreateValueBox(savedProfile?.FarClip ?? target.FarClipPlane);
+        _orthoSizeBox = CreateValueBox(savedProfile?.OrthographicSize ?? target.OrthographicSize);
+        _idleFpsBox = CreateValueBox(savedProfile?.IdleFps ?? target.IdleFps);
+        _activeFpsBox = CreateValueBox(savedProfile?.InteractiveFps ?? target.InteractiveFps);
+        _widthBox = CreateValueBox(savedProfile?.Width ?? target.Width);
+        _heightBox = CreateValueBox(savedProfile?.Height ?? target.Height);
 
         _autoViewportBox = new CheckBox
         {
@@ -70,12 +74,13 @@ internal sealed class SceneSettingsWindow : Window
         _autoViewportBox.IsCheckedChanged += (_, _) => UpdateResolutionEnabled();
 
         var cullingOptions = BuildCullingOptions();
+        var initialMode = savedProfile?.CullingMode ?? target.CullingMode;
         _cullingSelector = new ComboBox
         {
             ItemsSource = cullingOptions,
             MinWidth = 190,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            SelectedItem = cullingOptions.First(item => item.Mode == target.CullingMode)
+            SelectedItem = cullingOptions.First(item => item.Mode == initialMode)
         };
 
         _layersButton = new Button
