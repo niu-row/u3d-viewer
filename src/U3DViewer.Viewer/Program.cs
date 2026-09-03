@@ -11,8 +11,7 @@ internal static class Program
     {
         var lifetime = new ClassicDesktopStyleApplicationLifetime
         {
-            Args = args,
-            ShutdownMode = ShutdownMode.OnLastWindowClose
+            Args = args
         };
 
         AppBuilder.Configure<Application>()
