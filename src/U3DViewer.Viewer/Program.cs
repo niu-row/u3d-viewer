@@ -47,13 +47,10 @@ internal static class Program
                 {
                     Title = $"U3D Viewer — {target.ProcessName} ({target.ProcessId})"
                 };
+                Localization.Attach(mainWindow);
 
                 try
                 {
-                    // Keep the picker as the lifetime main window until the Scene/Hierarchy window
-                    // has actually completed its native-host initialization. If Show() fails, the
-                    // picker remains a valid recovery surface instead of leaving the lifetime pointed
-                    // at a window that never opened.
                     mainWindow.Show();
                     lifetime.MainWindow = mainWindow;
                     picker?.Close();
@@ -67,12 +64,12 @@ internal static class Program
                     }
                     catch
                     {
-                        // Show may have failed before a platform window was fully created.
                     }
                     throw;
                 }
             });
 
+            Localization.Attach(picker);
             lifetime.MainWindow = picker;
             var exitCode = lifetime.Start(args);
             ViewerLog.Info($"U3DViewer exited with code {exitCode}.");
