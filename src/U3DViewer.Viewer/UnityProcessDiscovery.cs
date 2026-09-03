@@ -16,6 +16,7 @@ internal sealed class UnityProcessInfo
     public required string ProcessName { get; init; }
     public required string ExecutablePath { get; init; }
     public required string Backend { get; init; }
+    public string Architecture { get; init; } = "Unknown";
     public required string PipeName { get; init; }
     public required AgentProcessStatus AgentStatus { get; init; }
 
@@ -31,6 +32,10 @@ internal static class UnityProcessDiscovery
 {
     private const int ErrorSemTimeout = 121;
     private const int ErrorPipeBusy = 231;
+    private const ushort ImageFileMachineI386 = 0x014c;
+    private const ushort ImageFileMachineAmd64 = 0x8664;
+    private const ushort ImageFileMachineArm64 = 0xaa64;
+    private const uint PeSignature = 0x00004550;
 
     public static IReadOnlyList<UnityProcessInfo> Scan()
     {
@@ -42,7 +47,7 @@ internal static class UnityProcessDiscovery
             {
                 var executablePath = process.MainModule?.FileName;
                 if (string.IsNullOrWhiteSpace(executablePath) ||
-                    !TryInspectExecutable(executablePath, out var backend))
+                    !TryInspectExecutable(executablePath, out var backend, out var architecture))
                 {
                     continue;
                 }
@@ -54,6 +59,7 @@ internal static class UnityProcessDiscovery
                     ProcessName = Path.GetFileName(executablePath),
                     ExecutablePath = executablePath,
                     Backend = backend,
+                    Architecture = architecture,
                     PipeName = pipeName,
                     AgentStatus = ProbeAgent(pipeName)
                 });
@@ -75,9 +81,13 @@ internal static class UnityProcessDiscovery
             .ToArray();
     }
 
-    public static bool TryInspectExecutable(string executablePath, out string backend)
+    public static bool TryInspectExecutable(string executablePath, out string backend) =>
+        TryInspectExecutable(executablePath, out backend, out _);
+
+    public static bool TryInspectExecutable(string executablePath, out string backend, out string architecture)
     {
         backend = "Unknown";
+        architecture = "Unknown";
         if (!File.Exists(executablePath) ||
             !string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase))
         {
@@ -104,7 +114,49 @@ internal static class UnityProcessDiscovery
         }
 
         backend = DetectBackend(directory, dataDirectory);
+        TryGetExecutableArchitecture(executablePath, out architecture);
         return true;
+    }
+
+    public static bool TryGetExecutableArchitecture(string executablePath, out string architecture)
+    {
+        architecture = "Unknown";
+        try
+        {
+            using var stream = File.Open(executablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (stream.Length < 0x40)
+            {
+                return false;
+            }
+
+            using var reader = new BinaryReader(stream);
+            stream.Position = 0x3c;
+            var peOffset = reader.ReadInt32();
+            if (peOffset < 0 || peOffset > stream.Length - 6)
+            {
+                return false;
+            }
+
+            stream.Position = peOffset;
+            if (reader.ReadUInt32() != PeSignature)
+            {
+                return false;
+            }
+
+            architecture = reader.ReadUInt16() switch
+            {
+                ImageFileMachineI386 => "x86",
+                ImageFileMachineAmd64 => "x64",
+                ImageFileMachineArm64 => "arm64",
+                _ => "Unknown"
+            };
+            return architecture != "Unknown";
+        }
+        catch
+        {
+            architecture = "Unknown";
+            return false;
+        }
     }
 
     private static string DetectBackend(string gameDirectory, string dataDirectory)
