@@ -127,7 +127,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                             _sceneCulling?.Reapply();
                         }
 
-                        if (command.Kind == ViewerCommandKind.CameraStreamSettings)
+                        if (command.Kind == ViewerCommandKind.CameraStreamSettings ||
+                            command.Kind == ViewerCommandKind.CameraRecover)
                         {
                             _interactiveHierarchyRefresh = true;
                             RestartHierarchyScan();
