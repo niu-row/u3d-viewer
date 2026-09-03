@@ -7,29 +7,34 @@ The project is split into a game-side runtime agent and a standalone viewer:
 - **U3DViewer.Agent.Mono** runs inside an authorized Unity Mono game via BepInEx and reads the live Unity scene graph.
 - **U3DViewer.Agent.IL2CPP** does the same for Unity IL2CPP games through BepInEx 6 + Il2CppInterop.
 - **U3DViewer.Protocol** contains the runtime-neutral wire messages shared by both agents and the viewer.
-- **U3DViewer.Viewer** runs as a separate process and receives live scene snapshots over a named pipe.
+- **U3DViewer.Viewer** is a standalone .NET 8 + Avalonia desktop application.
 - A later **NativeBridge** milestone will transport a Scene Camera render target to the standalone viewer using D3D11 shared resources.
 
 ## Current milestone
 
-Phase 0/1: prove the runtime hierarchy path on both Unity scripting backends before adding 3D rendering.
+M2 desktop UI is now in progress on top of the M0/M1 runtime hierarchy pipeline.
 
-1. Load either the Mono or IL2CPP agent in a built Unity game.
-2. Enumerate loaded scenes and GameObject hierarchy on the Unity main thread.
-3. Send the same `SceneSnapshot` format to a standalone viewer through a named pipe.
-4. Keep the viewer independent from Mono/IL2CPP runtime details.
+Implemented in the standalone viewer:
 
-## Initial scope
+- automatic Named Pipe connection/reconnection to either Mono or IL2CPP agent
+- live Runtime Hierarchy tree
+- selection that survives ordinary snapshot refreshes
+- read-only Runtime Inspector for GameObject state, Transform and component type names
+- connection and snapshot status
+- reserved Scene View panel for the upcoming runtime camera/render transport
 
-- Windows x64
+The 3D Scene View is **not implemented yet**. M3 adds the isolated runtime Scene Camera and bidirectional camera command protocol; M4 adds D3D11 shared-texture transport.
+
+## Scope
+
+- Windows x64 first
 - Unity Mono and IL2CPP
 - BepInEx 6
-- Read-only inspection
-- Named Pipe IPC
-- JSON messages
-- Standalone console viewer first
-- Avalonia UI and D3D11 Scene View after the data path is stable
-- No GitHub Actions; validation is local/manual
+- read-only inspection first
+- Named Pipe for runtime metadata/control
+- D3D11 shared resource planned for Scene View pixels
+- standalone Viewer independent from the target game's Unity version
+- no GitHub Actions; validation is local/manual
 
 ## Start here
 
