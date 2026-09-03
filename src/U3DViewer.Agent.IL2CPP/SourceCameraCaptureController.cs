@@ -32,6 +32,7 @@ internal sealed class SourceCameraCaptureController : IDisposable
     private int _renderWidth = DefaultRenderWidth;
     private int _renderHeight = DefaultRenderHeight;
     private int _renderGeneration;
+    private int _transportEpoch;
     private float _idleFps = DefaultIdleFps;
     private float _interactiveFps = DefaultInteractiveFps;
     private float _nextCaptureAt;
@@ -63,33 +64,69 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     public void SetEnabled(bool enabled)
     {
-        if (_enabled == enabled)
+        if (!enabled)
+        {
+            if (!_enabled)
+            {
+                return;
+            }
+
+            _enabled = false;
+            DetachBuiltInCommandBuffer();
+            ResetBridge();
+            ReleaseRenderTexture();
+            _effectiveSourceCameraInstanceId = 0;
+            _effectiveSourceCameraName = string.Empty;
+            _sceneFps = 0d;
+            _nextCaptureAt = 0f;
+            _status = "Direct source Camera capture is disabled.";
+            return;
+        }
+
+        if (_enabled && _bridgeReady &&
+            SceneTransportCoordinator.IsOwner(SceneTransportOwner.DirectCapture) &&
+            _transportEpoch == SceneTransportCoordinator.Epoch)
         {
             return;
         }
 
-        _enabled = enabled;
+        // A previous enable attempt may have failed after setting _enabled. Always rebuild from
+        // a clean state instead of treating a half-initialized controller as successfully enabled.
         if (_enabled)
         {
-            _renderGeneration++;
-            _nextCaptureAt = 0f;
-            _sceneFps = 0d;
+            _enabled = false;
+            DetachBuiltInCommandBuffer();
+            ResetBridge();
+            ReleaseRenderTexture();
+        }
+
+        _enabled = true;
+        _renderGeneration++;
+        _nextCaptureAt = 0f;
+        _sceneFps = 0d;
+
+        try
+        {
             EnsureRenderTexture();
             TryInitializeBridge();
             RefreshSourceCamera(force: true);
             _status = _bridgeReady
                 ? BuildReadyStatus()
                 : _status;
-            return;
         }
-
-        DetachBuiltInCommandBuffer();
-        ResetBridge();
-        ReleaseRenderTexture();
-        _effectiveSourceCameraInstanceId = 0;
-        _effectiveSourceCameraName = string.Empty;
-        _sceneFps = 0d;
-        _status = "Direct source Camera capture is disabled.";
+        catch (Exception ex)
+        {
+            _enabled = false;
+            DetachBuiltInCommandBuffer();
+            ResetBridge();
+            ReleaseRenderTexture();
+            _effectiveSourceCameraInstanceId = 0;
+            _effectiveSourceCameraName = string.Empty;
+            _sceneFps = 0d;
+            _nextCaptureAt = 0f;
+            _status = $"Direct source Camera capture enable failed: {ex.Message}";
+            throw;
+        }
     }
 
     public void Apply(ViewerCommand command)
@@ -144,9 +181,12 @@ internal sealed class SourceCameraCaptureController : IDisposable
     public RenderTargetInfo GetRenderTargetInfo()
     {
         var source = ResolveSourceCamera();
+        var ownsTransport =
+            SceneTransportCoordinator.IsOwner(SceneTransportOwner.DirectCapture) &&
+            _transportEpoch == SceneTransportCoordinator.Epoch;
         return new RenderTargetInfo
         {
-            Available = _bridgeReady,
+            Available = _bridgeReady && ownsTransport,
             SharedName = _sharedName,
             Width = _renderWidth,
             Height = _renderHeight,
@@ -182,8 +222,10 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     private void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
     {
-        if (!_enabled || !_viewerVisible || !_bridgeReady || camera is null ||
-            camera.GetInstanceID() != _effectiveSourceCameraInstanceId)
+        if (!_enabled || !_viewerVisible || !_bridgeReady ||
+            !SceneTransportCoordinator.IsOwner(SceneTransportOwner.DirectCapture) ||
+            _transportEpoch != SceneTransportCoordinator.Epoch ||
+            camera is null || camera.GetInstanceID() != _effectiveSourceCameraInstanceId)
         {
             return;
         }
@@ -253,7 +295,16 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     private Camera? ResolveSourceCamera()
     {
-        var cameras = Camera.allCameras;
+        Camera[] cameras;
+        try
+        {
+            cameras = Camera.allCameras ?? Array.Empty<Camera>();
+        }
+        catch
+        {
+            cameras = Array.Empty<Camera>();
+        }
+
         if (_selectedSourceCameraInstanceId != 0)
         {
             for (var index = 0; index < cameras.Length; index++)
@@ -267,7 +318,15 @@ internal sealed class SourceCameraCaptureController : IDisposable
             }
         }
 
-        var main = Camera.main;
+        Camera? main = null;
+        try
+        {
+            main = Camera.main;
+        }
+        catch
+        {
+        }
+
         if (IsUsableSourceCamera(main))
         {
             return main;
@@ -297,16 +356,38 @@ internal sealed class SourceCameraCaptureController : IDisposable
         return bestScreen ?? bestAny;
     }
 
-    private static bool IsUsableSourceCamera(Camera? camera) =>
-        camera is not null &&
-        camera.gameObject is not null &&
-        camera.gameObject.activeInHierarchy &&
-        !string.Equals(camera.gameObject.name, ViewerCameraObjectName, StringComparison.Ordinal);
+    private static bool IsUsableSourceCamera(Camera? camera)
+    {
+        if (camera is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return camera.gameObject is not null &&
+                   camera.gameObject.activeInHierarchy &&
+                   !string.Equals(camera.gameObject.name, ViewerCameraObjectName, StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private CameraInfo[] BuildCameraList()
     {
         var result = new List<CameraInfo>();
-        var cameras = Camera.allCameras;
+        Camera[] cameras;
+        try
+        {
+            cameras = Camera.allCameras ?? Array.Empty<Camera>();
+        }
+        catch
+        {
+            cameras = Array.Empty<Camera>();
+        }
+
         for (var index = 0; index < cameras.Length; index++)
         {
             var camera = cameras[index];
@@ -315,17 +396,24 @@ internal sealed class SourceCameraCaptureController : IDisposable
                 continue;
             }
 
-            result.Add(new CameraInfo
+            try
             {
-                InstanceId = camera.GetInstanceID(),
-                Name = camera.name ?? string.Empty,
-                Depth = camera.depth,
-                Enabled = camera.enabled,
-                ActiveInHierarchy = camera.gameObject.activeInHierarchy,
-                HasTargetTexture = camera.targetTexture is not null,
-                TargetDisplay = camera.targetDisplay,
-                Orthographic = camera.orthographic
-            });
+                result.Add(new CameraInfo
+                {
+                    InstanceId = camera.GetInstanceID(),
+                    Name = camera.name ?? string.Empty,
+                    Depth = camera.depth,
+                    Enabled = camera.enabled,
+                    ActiveInHierarchy = camera.gameObject.activeInHierarchy,
+                    HasTargetTexture = camera.targetTexture is not null,
+                    TargetDisplay = camera.targetDisplay,
+                    Orthographic = camera.orthographic
+                });
+            }
+            catch
+            {
+                // Cameras can disappear while additive scenes are changing. Ignore transient wrappers.
+            }
         }
 
         result.Sort((left, right) =>
@@ -382,7 +470,9 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     private CommandBuffer? EnsureCaptureCommand()
     {
-        if (_renderTexture is null || !_bridgeReady || _renderEvent == IntPtr.Zero)
+        if (_renderTexture is null || !_bridgeReady || _renderEvent == IntPtr.Zero ||
+            !SceneTransportCoordinator.IsOwner(SceneTransportOwner.DirectCapture) ||
+            _transportEpoch != SceneTransportCoordinator.Epoch)
         {
             return null;
         }
@@ -459,11 +549,13 @@ internal sealed class SourceCameraCaptureController : IDisposable
                 return;
             }
 
-            _sharedName = $"U3DViewer.Scene.Source.{Process.GetCurrentProcess().Id}.{_renderGeneration}";
+            _transportEpoch = SceneTransportCoordinator.Claim(SceneTransportOwner.DirectCapture);
+            _sharedName = $"U3DViewer.Scene.Source.{Process.GetCurrentProcess().Id}.{_renderGeneration}.{_transportEpoch}";
             if (NativeBridge.U3DViewer_SetSourceTexture(nativeTexture, _sharedName) == 0)
             {
                 _bridgeReady = false;
                 _status = $"NativeBridge rejected direct capture texture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
+                SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.DirectCapture);
                 return;
             }
 
@@ -480,6 +572,7 @@ internal sealed class SourceCameraCaptureController : IDisposable
         catch (Exception ex)
         {
             _bridgeReady = false;
+            SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.DirectCapture);
             _status = $"Direct source Camera transport initialization failed: {ex.Message}";
         }
     }
@@ -491,20 +584,14 @@ internal sealed class SourceCameraCaptureController : IDisposable
         var source = string.IsNullOrWhiteSpace(_effectiveSourceCameraName)
             ? "no source Camera"
             : $"{_effectiveSourceCameraName} [id {_effectiveSourceCameraInstanceId}]";
-        return $"Direct source Camera capture active: {source}; pipeline {pipelineName}.";
+        return $"Direct source Camera capture active: {source}; pipeline {pipelineName}; transport epoch {_transportEpoch}.";
     }
 
     private void ResetBridge()
     {
         _bridgeReady = false;
         _renderEvent = IntPtr.Zero;
-        try
-        {
-            NativeBridge.U3DViewer_Reset();
-        }
-        catch
-        {
-        }
+        SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.DirectCapture);
     }
 
     private void ReleaseRenderTexture()
@@ -561,8 +648,8 @@ internal sealed class SourceCameraCaptureController : IDisposable
     {
         RenderPipelineManager.endCameraRendering -= _endCameraRenderingHandler;
         DetachBuiltInCommandBuffer();
+        _enabled = false;
         ResetBridge();
         ReleaseRenderTexture();
-        _enabled = false;
     }
 }
