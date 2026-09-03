@@ -9,6 +9,8 @@ namespace U3DViewer.Viewer;
 
 internal sealed class MainWindow : Window
 {
+    private const int MaxSceneBootstrapAttempts = 20;
+
     private readonly ViewerConnection _connection = new();
     private readonly TextBlock _connectionStatus;
     private readonly TextBlock _snapshotStatus;
@@ -16,7 +18,10 @@ internal sealed class MainWindow : Window
     private readonly HierarchyPanel _hierarchyPanel;
     private readonly InspectorPanel _inspectorPanel;
     private readonly ScenePanel _scenePanel;
-    private bool _initialSceneCameraResetSent;
+    private readonly DispatcherTimer _sceneBootstrapTimer = new();
+
+    private int _sceneBootstrapAttempts;
+    private bool _sceneTargetReady;
 
     public MainWindow()
     {
@@ -56,6 +61,9 @@ internal sealed class MainWindow : Window
         _hierarchyPanel.ExpansionChanged += (instanceId, expanded) =>
             SendCommand(ViewerCommandCodec.EncodeHierarchyExpanded(instanceId, expanded));
 
+        _sceneBootstrapTimer.Interval = TimeSpan.FromMilliseconds(500);
+        _sceneBootstrapTimer.Tick += (_, _) => BootstrapSceneCamera();
+
         Content = BuildLayout();
 
         _connection.StateChanged += state => Dispatcher.UIThread.Post(() => UpdateConnectionState(state));
@@ -65,6 +73,7 @@ internal sealed class MainWindow : Window
         Opened += (_, _) => _connection.Start();
         Closed += (_, _) =>
         {
+            _sceneBootstrapTimer.Stop();
             _hierarchyPanel.Shutdown();
             _inspectorPanel.Shutdown();
             _scenePanel.Shutdown();
@@ -152,13 +161,10 @@ internal sealed class MainWindow : Window
         _snapshotStatus.Text = Localization.Translate(
             $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)");
 
-        if (!_initialSceneCameraResetSent && snapshot.RenderTarget?.Available == true)
+        if (snapshot.RenderTarget?.Available == true)
         {
-            // The Agent can create its Scene Camera before the game's Camera.main is ready.
-            // Reset once after the first usable target arrives so the initial pose is copied
-            // at a more reliable point in the game's startup sequence. ScenePanel then
-            // reapplies any per-game persisted lens/stream/culling settings afterwards.
-            _initialSceneCameraResetSent = _connection.TrySendCommand(ViewerCommandCodec.EncodeCameraReset());
+            _sceneTargetReady = true;
+            _sceneBootstrapTimer.Stop();
         }
 
         _hierarchyPanel.ApplyScenes(snapshot.Scenes);
@@ -180,17 +186,50 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Text = Localization.T("main.connected");
                 _connectionStatus.Foreground = Brushes.Green;
                 _connectionDetail.Text = Localization.T("main.receiving");
+                StartSceneBootstrap();
                 break;
 
             default:
                 _connectionStatus.Text = Localization.T("main.disconnected");
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = Localization.T("main.waitAgent");
-                _initialSceneCameraResetSent = false;
+                _sceneBootstrapTimer.Stop();
+                _sceneBootstrapAttempts = 0;
+                _sceneTargetReady = false;
                 _hierarchyPanel.ResetConnectionState();
                 _scenePanel.SetDisconnected();
                 break;
         }
+    }
+
+    private void StartSceneBootstrap()
+    {
+        _sceneBootstrapTimer.Stop();
+        _sceneBootstrapAttempts = 0;
+        _sceneTargetReady = false;
+        BootstrapSceneCamera();
+        if (!_sceneTargetReady && _sceneBootstrapAttempts < MaxSceneBootstrapAttempts)
+        {
+            _sceneBootstrapTimer.Start();
+        }
+    }
+
+    private void BootstrapSceneCamera()
+    {
+        if (_sceneTargetReady)
+        {
+            _sceneBootstrapTimer.Stop();
+            return;
+        }
+
+        if (_sceneBootstrapAttempts >= MaxSceneBootstrapAttempts)
+        {
+            _sceneBootstrapTimer.Stop();
+            return;
+        }
+
+        _sceneBootstrapAttempts++;
+        _connection.TrySendCommand(ViewerCommandCodec.EncodeCameraReset());
     }
 
     private void SendCommand(string command)
