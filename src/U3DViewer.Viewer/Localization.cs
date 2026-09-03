@@ -194,6 +194,10 @@ internal static class Localization
             Children = { label, selector }
         };
 
+        // Detach the existing content from the Window's logical tree before reparenting it
+        // under the localization wrapper. Avalonia 12 rejects a control with two logical parents.
+        window.Content = null;
+
         var wrapper = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         wrapper.Children.Add(new Border
         {
