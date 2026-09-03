@@ -178,7 +178,7 @@ internal static class SceneScanner
         }
     }
 
-    private readonly struct SceneScanWorkItem
+    internal readonly struct SceneScanWorkItem
     {
         public SceneScanWorkItem(GameObject gameObject, GameObjectInfo[] target, int index)
         {
