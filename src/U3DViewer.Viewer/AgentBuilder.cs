@@ -205,6 +205,9 @@ internal static class AgentBuilder
             ViewerLog.Info($"Resolved IL2CPP mscorlib reference: {references.Il2CppMscorlibPath}");
         }
 
+        var targetFramework = ResolveTargetFramework(backend, references);
+        ViewerLog.Info($"Selected {backend} Agent target framework: {targetFramework}.");
+
         string fingerprint;
         try
         {
@@ -255,10 +258,10 @@ internal static class AgentBuilder
         }
 
         var projectFolder = GetProjectFolder(backend);
-        var targetFramework = backend == "Mono" ? "netstandard2.0" : "net6.0";
         var projectPath = Path.Combine(workspace, "src", projectFolder, projectFolder + ".csproj");
 
-        progress?.Report($"Building {backend} Agent for compatibility profile {ShortFingerprint(fingerprint)} (first use only)...");
+        progress?.Report(
+            $"Building {backend} Agent ({targetFramework}) for compatibility profile {ShortFingerprint(fingerprint)} (first use only)...");
 
         var startInfo = new ProcessStartInfo
         {
@@ -273,6 +276,8 @@ internal static class AgentBuilder
         startInfo.ArgumentList.Add(projectPath);
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add(Configuration);
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(targetFramework);
         startInfo.ArgumentList.Add("--nologo");
         startInfo.ArgumentList.Add($"-p:UnityCoreReference={references.CorePath}");
         startInfo.ArgumentList.Add($"-p:UnitySceneReference={references.ScenePath}");
@@ -281,7 +286,7 @@ internal static class AgentBuilder
             startInfo.ArgumentList.Add($"-p:Il2CppMscorlibReference={references.Il2CppMscorlibPath}");
         }
 
-        ViewerLog.Info($"Starting Agent build: {dotnet} build {projectPath} -c {Configuration}");
+        ViewerLog.Info($"Starting Agent build: {dotnet} build {projectPath} -c {Configuration} -f {targetFramework}");
         ViewerLog.Info($"Agent build workspace: {workspace}");
 
         try
@@ -347,6 +352,7 @@ internal static class AgentBuilder
             File.WriteAllText(
                 Path.Combine(cacheDirectory, "compatibility.txt"),
                 $"backend={backend}{Environment.NewLine}" +
+                $"targetFramework={targetFramework}{Environment.NewLine}" +
                 $"fingerprint={fingerprint}{Environment.NewLine}" +
                 $"core={references.CorePath}{Environment.NewLine}" +
                 $"scene={references.ScenePath}{Environment.NewLine}" +
@@ -409,6 +415,7 @@ internal static class AgentBuilder
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         AppendText(hash, "U3DViewer-Agent-Compatibility-v4");
         AppendText(hash, backend);
+        AppendText(hash, "target-framework:" + ResolveTargetFramework(backend, references));
 
         var projectFolder = GetProjectFolder(backend);
         var builderInputs = new List<string>();
@@ -440,6 +447,47 @@ internal static class AgentBuilder
         }
 
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static string ResolveTargetFramework(string backend, UnityReferenceSet references)
+    {
+        if (backend == "IL2CPP")
+        {
+            return "net6.0";
+        }
+
+        return ReferencesLegacyMscorlib(references.CorePath)
+            ? "net35"
+            : "netstandard2.0";
+    }
+
+    private static bool ReferencesLegacyMscorlib(string path)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var peReader = new PEReader(stream);
+            if (!peReader.HasMetadata)
+            {
+                return false;
+            }
+
+            var metadata = peReader.GetMetadataReader();
+            foreach (var handle in metadata.AssemblyReferences)
+            {
+                var reference = metadata.GetAssemblyReference(handle);
+                if (metadata.StringComparer.Equals(reference.Name, "mscorlib"))
+                {
+                    return reference.Version.Major < 4;
+                }
+            }
+        }
+        catch
+        {
+            // If metadata probing fails, retain the modern Mono target and let the build surface the issue.
+        }
+
+        return false;
     }
 
     private static void AppendReference(IncrementalHash hash, string role, string path)
