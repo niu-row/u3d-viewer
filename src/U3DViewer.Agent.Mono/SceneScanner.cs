@@ -7,6 +7,8 @@ namespace U3DViewer.Agent.Mono;
 
 internal static class SceneScanner
 {
+    private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
     public static SceneScanSession Begin(long sequence, int selectedInstanceId, HashSet<int> expandedInstanceIds)
     {
         var scenes = new SceneInfo[SceneManager.sceneCount];
@@ -36,7 +38,7 @@ internal static class SceneScanner
             new SceneSnapshot
             {
                 Sequence = sequence,
-                UnixTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                UnixTimeMs = (long)(DateTime.UtcNow - UnixEpoch).TotalMilliseconds,
                 Scenes = scenes
             },
             selectedInstanceId,
@@ -109,10 +111,10 @@ internal static class SceneScanner
                 var shouldLoadChildren = childCount > 0 && _expandedInstanceIds.Contains(instanceId);
                 var children = shouldLoadChildren
                     ? new GameObjectInfo[childCount]
-                    : Array.Empty<GameObjectInfo>();
+                    : new GameObjectInfo[0];
 
                 var transformInfo = new TransformInfo();
-                var componentNames = Array.Empty<string>();
+                var componentNames = new string[0];
                 var layer = 0;
                 var tag = string.Empty;
 
@@ -189,7 +191,7 @@ internal static class SceneScanner
         }
     }
 
-    internal readonly struct SceneScanWorkItem
+    internal struct SceneScanWorkItem
     {
         public SceneScanWorkItem(GameObject gameObject, GameObjectInfo[] target, int index)
         {
@@ -198,9 +200,9 @@ internal static class SceneScanner
             Index = index;
         }
 
-        public GameObject GameObject { get; }
-        public GameObjectInfo[] Target { get; }
-        public int Index { get; }
+        public GameObject GameObject { get; private set; }
+        public GameObjectInfo[] Target { get; private set; }
+        public int Index { get; private set; }
     }
 
     private static GameObjectInfo UnavailableObject() => new()
