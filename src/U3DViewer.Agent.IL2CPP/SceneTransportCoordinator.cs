@@ -32,6 +32,17 @@ internal static class SceneTransportCoordinator
         return _epoch;
     }
 
+    internal static int Observe(SceneTransportOwner owner)
+    {
+        if (_owner != owner)
+        {
+            _owner = owner;
+            _epoch++;
+        }
+
+        return _epoch;
+    }
+
     internal static bool IsOwner(SceneTransportOwner owner) => _owner == owner;
 
     internal static void ResetIfOwner(SceneTransportOwner owner)
