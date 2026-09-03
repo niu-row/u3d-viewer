@@ -71,6 +71,9 @@ internal sealed class SourceCameraCaptureController : IDisposable
         _enabled = enabled;
         if (_enabled)
         {
+            _renderGeneration++;
+            _nextCaptureAt = 0f;
+            _sceneFps = 0d;
             EnsureRenderTexture();
             TryInitializeBridge();
             RefreshSourceCamera(force: true);
