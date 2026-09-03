@@ -14,7 +14,6 @@ internal sealed class NativeSceneHost : NativeControlHost
     private const string LibraryName = "U3DViewer.NativeBridge";
     private const float MouseSensitivity = 0.12f;
     private const float ShiftBoost = 4f;
-    private static readonly TimeSpan RecoveryWatchdogInterval = TimeSpan.FromSeconds(1);
 
     private readonly Action<string> _sendCommand;
     private readonly Action _focusSelected;
@@ -34,7 +33,7 @@ internal sealed class NativeSceneHost : NativeControlHost
     private long _lastTickTimestamp = Stopwatch.GetTimestamp();
     private float _moveSpeed = 10f;
     private string _lastStatus = string.Empty;
-    private DateTime _nextRecoveryWatchdogUtc = DateTime.MinValue;
+    private string _recoveryTargetKey = string.Empty;
 
     public NativeSceneHost(Action<string> sendCommand, Action focusSelected)
     {
@@ -304,7 +303,7 @@ internal sealed class NativeSceneHost : NativeControlHost
                         continue;
                     }
 
-                    presenterOpen = TryOpenPresenterNative(requestedWindow, target);
+                    presenterOpen = TryOpenPresenterNative(requestedWindow, target, requestedKey);
                     if (!presenterOpen)
                     {
                         nextOpenAttemptUtc = now + TimeSpan.FromMilliseconds(250);
@@ -322,12 +321,12 @@ internal sealed class NativeSceneHost : NativeControlHost
                 {
                     if (presentResult > 0)
                     {
-                        _nextRecoveryWatchdogUtc = DateTime.MinValue;
+                        _recoveryTargetKey = string.Empty;
                     }
                     continue;
                 }
 
-                RequestRecoveryWatchdog("present failure");
+                RequestRecoveryWatchdog("present failure", openedKey);
                 ClosePresenterNative(openedWindow);
                 presenterOpen = false;
                 openedWindow = IntPtr.Zero;
@@ -346,7 +345,7 @@ internal sealed class NativeSceneHost : NativeControlHost
         }
     }
 
-    private bool TryOpenPresenterNative(IntPtr window, RenderTargetInfo target)
+    private bool TryOpenPresenterNative(IntPtr window, RenderTargetInfo target, string targetKey)
     {
         try
         {
@@ -365,12 +364,12 @@ internal sealed class NativeSceneHost : NativeControlHost
                     $"Could not open GPU Scene presenter at {stage} (HRESULT 0x{hresult:X8}, source DXGI {target.DxgiFormat}). " +
                     $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
 
-                // The game-side transport can transiently lose the current shared generation.
-                // Request a transport-only rebuild at most once per second; unlike Camera.Reset,
-                // this preserves Scene Camera transform, lens, projection and culling state.
+                // A ready generation should normally open immediately. If it still fails, allow
+                // one transport-only recovery for this exact generation, then wait for a new
+                // generation instead of rebuilding the same transport once per second forever.
                 if (initStage >= 4 && initStage <= 12)
                 {
-                    RequestRecoveryWatchdog($"open failure at {stage}");
+                    RequestRecoveryWatchdog($"open failure at {stage}", targetKey);
                 }
                 return false;
             }
@@ -421,15 +420,15 @@ internal sealed class NativeSceneHost : NativeControlHost
         return -1;
     }
 
-    private void RequestRecoveryWatchdog(string reason)
+    private void RequestRecoveryWatchdog(string reason, string targetKey)
     {
-        var now = DateTime.UtcNow;
-        if (now < _nextRecoveryWatchdogUtc)
+        if (string.IsNullOrWhiteSpace(targetKey) ||
+            string.Equals(_recoveryTargetKey, targetKey, StringComparison.Ordinal))
         {
             return;
         }
 
-        _nextRecoveryWatchdogUtc = now + RecoveryWatchdogInterval;
+        _recoveryTargetKey = targetKey;
         ViewerLog.Warning($"Scene presenter watchdog requested transport recovery after {reason}.");
         Dispatcher.UIThread.Post(() => _sendCommand(ViewerCommandCodec.EncodeCameraRecover()));
     }
