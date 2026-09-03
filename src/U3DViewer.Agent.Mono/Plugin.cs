@@ -24,6 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
     private readonly HashSet<int> _expandedInstanceIds = new();
     private PipeServer? _pipeServer;
     private SceneCameraController? _sceneCamera;
+    private SceneCullingController? _sceneCulling;
     private SceneScanner.SceneScanSession? _sceneScan;
     private Task<SerializedSnapshot>? _snapshotSerialization;
     private float _nextSnapshotAt;
@@ -52,6 +53,7 @@ public sealed class Plugin : BaseUnityPlugin
 
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
         _sceneCamera = new SceneCameraController();
+        _sceneCulling = new SceneCullingController();
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
         _sceneScan = null;
@@ -106,6 +108,14 @@ public sealed class Plugin : BaseUnityPlugin
                         continue;
                     default:
                         _sceneCamera?.Apply(command);
+                        if (command.Kind == ViewerCommandKind.CameraCullingMask)
+                        {
+                            _sceneCulling?.Apply(command);
+                        }
+                        else if (command.Kind == ViewerCommandKind.CameraReset)
+                        {
+                            _sceneCulling?.Reapply();
+                        }
                         break;
                 }
             }
@@ -171,7 +181,9 @@ public sealed class Plugin : BaseUnityPlugin
             RecordHierarchyScan(_currentScanNodes, _currentScanMs);
 
             var snapshot = _sceneScan.Snapshot;
-            snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
+            var renderTarget = _sceneCamera?.GetRenderTargetInfo();
+            _sceneCulling?.Populate(renderTarget);
+            snapshot.RenderTarget = renderTarget;
             snapshot.Performance = BuildPerformanceInfo();
             _sceneCamera?.PopulatePerformance(snapshot.Performance);
             _sceneScan = null;
@@ -288,6 +300,7 @@ public sealed class Plugin : BaseUnityPlugin
         ResetSnapshotState();
         _expandedInstanceIds.Clear();
         _interactiveHierarchyRefresh = false;
+        _sceneCulling = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
         _pipeServer?.Dispose();
