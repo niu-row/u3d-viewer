@@ -81,8 +81,9 @@ internal static class AgentBuilder
 
     public static bool HasRequiredReferences(string executablePath, string backend, out string referenceDirectory)
     {
-        referenceDirectory = GetReferenceDirectory(executablePath, backend);
-        return RequiredUnityAssemblies.All(file => File.Exists(Path.Combine(referenceDirectory, file)));
+        var resolvedReferenceDirectory = GetReferenceDirectory(executablePath, backend);
+        referenceDirectory = resolvedReferenceDirectory;
+        return RequiredUnityAssemblies.All(file => File.Exists(Path.Combine(resolvedReferenceDirectory, file)));
     }
 
     public static async Task<AgentBuildResult> BuildAsync(
