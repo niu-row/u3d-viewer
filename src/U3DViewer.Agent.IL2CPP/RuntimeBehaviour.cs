@@ -15,8 +15,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static SceneCameraController? _sceneCamera;
     private static SceneScanner.SceneScanSession? _sceneScan;
     private static Task<string>? _snapshotSerialization;
-    private static SceneSnapshot? _pendingPublishedSnapshot;
-    private static SceneSnapshot? _lastPublishedSnapshot;
+    private static readonly HashSet<int> ExpandedInstanceIds = new();
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
@@ -38,8 +37,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sceneCamera = new SceneCameraController();
         _sceneScan = null;
         _snapshotSerialization = null;
-        _pendingPublishedSnapshot = null;
-        _lastPublishedSnapshot = null;
+        ExpandedInstanceIds.Clear();
         _nextSnapshotAt = 0f;
         _sequence = 0;
         _selectedInstanceId = 0;
@@ -60,12 +58,11 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
             ResetSnapshotState();
+            ExpandedInstanceIds.Clear();
             _nextSnapshotAt = 0f;
             return;
         }
 
-        // Some games change this setting after startup. Viewer mode requires the Unity
-        // player loop to keep running while its window is not focused.
         if (!Application.runInBackground)
         {
             Application.runInBackground = true;
@@ -75,17 +72,27 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             try
             {
-                if (command.Kind == ViewerCommandKind.SelectObject)
+                switch (command.Kind)
                 {
-                    _selectedInstanceId = command.InstanceId;
-                    _sceneScan = null;
-                    _snapshotSerialization = null;
-                    _pendingPublishedSnapshot = null;
-                    _nextSnapshotAt = 0f;
-                    continue;
+                    case ViewerCommandKind.SelectObject:
+                        _selectedInstanceId = command.InstanceId;
+                        RestartHierarchyScan();
+                        continue;
+                    case ViewerCommandKind.HierarchyExpanded:
+                        if (command.Flag)
+                        {
+                            ExpandedInstanceIds.Add(command.InstanceId);
+                        }
+                        else
+                        {
+                            ExpandedInstanceIds.Remove(command.InstanceId);
+                        }
+                        RestartHierarchyScan();
+                        continue;
+                    default:
+                        _sceneCamera?.Apply(command);
+                        break;
                 }
-
-                _sceneCamera?.Apply(command);
             }
             catch (Exception ex)
             {
@@ -111,7 +118,10 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
             try
             {
-                _sceneScan = SceneScanner.Begin(++_sequence, _selectedInstanceId);
+                _sceneScan = SceneScanner.Begin(
+                    ++_sequence,
+                    _selectedInstanceId,
+                    new HashSet<int>(ExpandedInstanceIds));
             }
             catch (Exception ex)
             {
@@ -134,11 +144,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
 
-            var previous = _lastPublishedSnapshot;
-            _pendingPublishedSnapshot = snapshot;
-            _snapshotSerialization = Task.Run(() => previous is null
-                ? JsonSnapshotWriter.Write(snapshot)
-                : JsonSnapshotWriter.Write(SceneDeltaBuilder.Build(previous, snapshot)));
+            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)
         {
@@ -152,6 +158,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     {
         RestoreBackgroundExecution();
         ResetSnapshotState();
+        ExpandedInstanceIds.Clear();
         _sceneCamera?.Dispose();
         _sceneCamera = null;
     }
@@ -164,29 +171,30 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             return;
         }
 
-        var publishedSnapshot = _pendingPublishedSnapshot;
         _snapshotSerialization = null;
-        _pendingPublishedSnapshot = null;
-
         if (task.Status == TaskStatus.RanToCompletion)
         {
             pipeServer.Publish(task.Result);
-            _lastPublishedSnapshot = publishedSnapshot;
             return;
         }
 
         if (task.IsFaulted)
         {
-            _log?.LogError($"Failed to serialize IL2CPP scene update: {task.Exception?.GetBaseException().Message}");
+            _log?.LogError($"Failed to serialize IL2CPP scene snapshot: {task.Exception?.GetBaseException().Message}");
         }
+    }
+
+    private static void RestartHierarchyScan()
+    {
+        _sceneScan = null;
+        _snapshotSerialization = null;
+        _nextSnapshotAt = 0f;
     }
 
     private static void ResetSnapshotState()
     {
         _sceneScan = null;
         _snapshotSerialization = null;
-        _pendingPublishedSnapshot = null;
-        _lastPublishedSnapshot = null;
     }
 
     private static void RestoreBackgroundExecution()
