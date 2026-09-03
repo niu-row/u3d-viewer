@@ -34,14 +34,37 @@ U3DViewer.Viewer.exe
 
 通过 `Prepare + Restart` 选择已经运行的游戏时，U3DViewer 只会请求其正常退出，不会强制杀掉用户正在玩的进程。由 U3DViewer 自己启动、仅用于 IL2CPP interop 生成的临时 bootstrap 进程，在生成完成后可以由 U3DViewer 终止。
 
-## 界面语言
+## 运行数据目录
 
-Viewer 当前支持 English 和简体中文。
-
-首次运行时会跟随操作系统 UI 语言：`zh-*` 默认选择简体中文，其余语言回退为英文。Viewer 顶部可以随时切换语言，选择会保存到：
+Viewer 自身的全局数据统一放在 `U3DViewer.Viewer.exe` 旁边：
 
 ```text
-%LOCALAPPDATA%/U3DViewer/language.txt
+<Viewer>\U3DViewer\
+├─ language.txt
+└─ Logs\
+```
+
+每个游戏自己的 U3DViewer 数据统一放在游戏 exe 旁边：
+
+```text
+<Game>\U3DViewer\
+├─ Settings\scene.json
+├─ Downloads\
+├─ AgentCache\<Backend>\<compatibility-fingerprint>\
+├─ Temp\AgentBuilder\<Backend>-<ViewerPID>\
+└─ Logs\viewer-*.log
+```
+
+选中游戏后，当前 Viewer 日志会转移到这个游戏的 `U3DViewer/Logs`。Agent 构建成功后会复制到 `AgentCache`，对应的临时 workspace 会删除；构建失败时临时 workspace 会保留下来方便排查。
+
+旧版本使用 `%LOCALAPPDATA%\U3DViewer`。新版不再向该位置写入运行数据，但不会自动删除历史文件。
+
+## 界面语言
+
+Viewer 当前支持 English 和简体中文。首次运行时会跟随操作系统 UI 语言：`zh-*` 默认选择简体中文，其余语言回退为英文。语言设置保存在：
+
+```text
+<Viewer>\U3DViewer\language.txt
 ```
 
 诊断日志、构建输出、异常原文、Unity 类型名以及第三方运行时消息会保留原始技术文本，便于直接搜索错误信息。
@@ -50,48 +73,27 @@ Viewer 当前支持 English 和简体中文。
 
 开发版 Viewer 除 Avalonia GUI 外还会保留控制台窗口。准备或连接游戏时建议不要关闭控制台。
 
-以下信息会写入控制台：
+以下信息会写入控制台：运行环境准备过程、Unity 引用路径、compatibility fingerprint、Agent cache 命中情况、Agent 构建输出、Scene GPU / DXGI adapter 信息以及原生 Scene presenter 错误。
 
-- 运行环境准备过程
-- 实际解析到的 Unity 引用路径
-- compatibility fingerprint
-- Agent cache 命中情况
-- Agent 构建 stdout/stderr
-- Scene GPU / DXGI adapter 信息
-- 原生 Scene presenter 初始化或显示错误
-
-同样的日志会保存到：
+未选择游戏前，文件日志位于 `<Viewer>/U3DViewer/Logs`；选择游戏后会转移到：
 
 ```text
-%LOCALAPPDATA%/U3DViewer/Logs/
-  viewer-YYYYMMDD-HHMMSS-<PID>.log
+<Game>\U3DViewer\Logs\viewer-YYYYMMDD-HHMMSS-<PID>.log
 ```
 
-Viewer 未处理异常也会写到这里。游戏端 BepInEx / Agent 加载问题继续查看 `BepInEx/LogOutput.log`。
+游戏端 BepInEx / Agent 加载问题继续查看 `BepInEx/LogOutput.log`。
 
 ## Agent 复用与缓存
 
-Agent 不会每次启动都重新编译。
-
-缓存位于：
+Agent 不会每次启动都重新编译。每个游戏自己的缓存位于：
 
 ```text
-%LOCALAPPDATA%/U3DViewer/AgentCache/
+<Game>\U3DViewer\AgentCache\
   Mono/<compatibility-fingerprint>/
   IL2CPP/<compatibility-fingerprint>/
 ```
 
-fingerprint 会包含目标后端、内置 Agent/Protocol Builder 输入，以及 Agent 实际编译所依赖 Unity 程序集的 SHA-256。
-
-因此：
-
-- 同一个游戏再次打开通常直接命中缓存；
-- Unity 兼容程序集一致的两个 Mono 游戏可以复用同一 Agent cache；
-- 生成出的 Unity proxy assemblies 一致的 IL2CPP 目标也可以复用；
-- Unity / interop 更新会自动生成新的 cache key；
-- U3DViewer Agent 或 Protocol 源码变化也会自动使旧缓存失效。
-
-这是基于兼容 profile 的复用，而不是把同一个二进制无条件塞给所有 Unity 版本。
+fingerprint 会包含目标后端、内置 Agent/Protocol Builder 输入，以及 Agent 实际编译所依赖 Unity 程序集的 SHA-256。因此同一个游戏再次打开通常会直接命中自己的缓存；Unity / interop 更新，或 U3DViewer Agent / Protocol 源码变化时，会自动生成新的 cache key。
 
 ## 在 VSCode 中构建
 
@@ -111,9 +113,13 @@ src/U3DViewer.Viewer/bin/Release/net8.0/agent-builder/...
 
 构建 Viewer 本身时不需要指定目标游戏路径。
 
-Viewer 内置的 Agent Builder 只有在目标 compatibility profile 没有缓存时，才会把源码 workspace 复制到 `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`。Mono 使用 BepInEx Unity facade 并结合目标兼容输入；IL2CPP 引用来自 BepInEx 完成生成后的 `BepInEx/interop`。
+Viewer 内置的 Agent Builder 只有在目标游戏对应 compatibility profile 没有缓存时，才会把源码 workspace 复制到：
 
-因此，新 compatibility profile 第一次构建仍需要本机 .NET SDK；命中缓存时不会调用 `dotnet build`。
+```text
+<Game>\U3DViewer\Temp\AgentBuilder\
+```
+
+Mono 使用 BepInEx Unity facade 并结合目标兼容输入；IL2CPP 引用来自 BepInEx 完成生成后的 `BepInEx/interop`。新的 compatibility profile 第一次构建仍需要本机 .NET SDK；命中缓存时不会调用 `dotnet build`。
 
 ## 运行时架构
 
@@ -130,7 +136,7 @@ Unity Game.exe
 U3DViewer.Viewer.exe
 ├─ 进程选择 / Open Game
 ├─ 自动运行环境准备
-├─ compatibility Agent cache
+├─ 每游戏独立 compatibility Agent cache
 ├─ Lazy Runtime Hierarchy
 ├─ Runtime Inspector
 └─ Scene View
@@ -140,13 +146,11 @@ U3DViewer.Viewer.exe
             └─ 在与游戏相同的 GPU adapter 上直接采样共享纹理
 ```
 
-当前 Scene 显示路径不会进行 GPU -> CPU staging readback。Viewer 根据相同的 DXGI adapter LUID 打开命名共享纹理，通过小型 D3D11 shader 直接采样，在 GPU 上完成 Unity RenderTexture 的 Y 翻转，然后直接显示到嵌入式 HWND swap chain。
+当前 Scene 显示路径不会进行 GPU -> CPU staging readback。Viewer 根据相同的 DXGI adapter LUID 打开命名共享纹理，通过 D3D11 shader 直接采样，在 GPU 上完成 Unity RenderTexture 的 Y 翻转，然后直接显示到嵌入式 HWND swap chain。
 
 Hierarchy 使用按需展开策略：首次只加载 Scene roots，只有用户展开的分支才继续读取 children。Unity API 访问仍全部发生在 Unity 主线程，并使用较小的逐帧预算分散扫描成本；snapshot JSON 序列化放在 Unity 主线程之外执行。
 
 ## Scene View 操作
-
-Scene host 使用原生 Win32 输入，因此相机导航不依赖键盘自动重复或 Avalonia 指针边界。
 
 ```text
 右键 + 鼠标      自由观察（Raw Input）
@@ -160,31 +164,41 @@ F                 聚焦选中的 GameObject
 
 当前飞行速度会直接显示在 Scene 工具栏中，滚轮改变速度后会立即更新数值。
 
-Scene 流参数可以在 Viewer 内直接调整：
+Scene 主工具栏只保留高频操作。FOV、Near/Far、Orthographic Size、Idle/Active FPS、分辨率方式和 Culling Mask 都放在独立的“场景设置”窗口里。
+
+默认流设置为：
 
 ```text
-Idle FPS        1-120    默认 15
-Active FPS      1-120    默认 30
-Width           64-4096  默认 1280
-Height          64-4096  默认 720
+Idle FPS        15
+Active FPS      30
+自动匹配视口     开启
+手动尺寸回退     1280 x 720
 ```
 
-修改分辨率时会重新创建 Unity RenderTexture 和 D3D11 shared texture。Idle / Active FPS 用于在 Scene View 响应速度和目标游戏额外 `Camera.Render()` 开销之间取舍。
+自动匹配视口开启时，Unity RenderTexture 会跟随 Scene View 实际宽度、高度和比例。拖动窗口时会做防抖，停止调整后才重建共享纹理；关闭自动匹配后可以使用 64-4096 的固定宽高。
 
-Scene 镜头参数也可以直接调整，包括 FOV、Near / Far 裁剪面和 Orthographic Size。Perspective / Orthographic 切换由 Viewer 的独立 Scene Camera 管理，不必跟随游戏主相机的投影模式。
+场景设置会按游戏持久化到：
 
-Scene Camera 的 `cullingMask` 现在也可以独立选择：`所有` 会渲染全部 32 个 Unity Layer；`复制主相机` 会按 snapshot 刷新节奏跟随当前 `Camera.main.cullingMask`；`手动` 会打开 32 Layer 勾选窗口，并显示目标游戏实际定义的 Layer 名称。当前 32-bit mask 同时会以十六进制显示。为了保持现有行为不突然变化，默认仍然是 `复制主相机`。
+```text
+<Game>\U3DViewer\Settings\scene.json
+```
+
+保存内容包括 FOV、Near/Far、Orthographic Size、Idle/Active FPS、自动/手动分辨率设置以及 Culling 模式和 Mask。再次连接同一个游戏时会自动恢复。
+
+修改 Scene 分辨率时会重新创建 Unity RenderTexture 和 D3D11 shared texture。Agent 在 `camera.stream` 修改后会立即刷新一次 Scene target 状态，因此 Viewer 不需要再等待正常约 1 秒的 snapshot 周期才能打开新的共享纹理。
+
+Scene Camera 的 `cullingMask` 可以独立选择：`所有` 渲染全部 32 个 Unity Layer；`复制主相机` 按 snapshot 节奏跟随当前 `Camera.main.cullingMask`；`手动` 打开 32 Layer 勾选窗口，并显示游戏实际定义的 Layer 名称。没有游戏级保存配置时，默认仍然是 `复制主相机`。
 
 ## 性能指标
 
-Scene 底部会显示轻量性能指标，用于根据实际测量结果优化：
+Scene 底部显示精简的当前性能指标：
 
-- Scene `Camera.Render()` CPU 侧提交耗时：最近 / 平均 / 最大；
-- Lazy Hierarchy 本轮扫描节点数和扫描耗时：最近 / 平均 / 最大；
+- Scene `Camera.Render()` CPU 侧提交耗时；
+- Lazy Hierarchy 本轮扫描节点数和扫描耗时；
 - snapshot JSON 序列化耗时；
 - snapshot UTF-8 payload 大小。
 
-其中 Scene Render 指标测量的是 `Camera.Render()` 与 native copy event 提交附近的 CPU 耗时，不是 D3D11 GPU timestamp。
+Agent 内部仍保留平均值和最大值统计。Scene Render 指标测量的是 `Camera.Render()` 与 native copy event 提交附近的 CPU 耗时，不是 D3D11 GPU timestamp。
 
 ## 当前能力
 
@@ -194,17 +208,18 @@ Scene 底部会显示轻量性能指标，用于根据实际测量结果优化�
 - GUI `Attach`、`Prepare + Restart`、`Open Game...`
 - 缺失时自动安装 BepInEx 6 x64
 - 自动构建并部署与目标兼容的 Agent
-- compatibility-keyed Agent cache / 复用
+- 每游戏独立 compatibility-keyed Agent cache
+- 每游戏持久化 Scene 设置
 - Lazy 实时 Runtime Hierarchy
 - 只读 Runtime Inspector
 - 类 Unity Scene View 的飞行相机控制
 - 可调 Perspective / Orthographic Scene 镜头
-- 可调 Scene FPS 和 RenderTexture 分辨率
+- 自动自由比例 Scene RenderTexture 尺寸或固定手动分辨率
+- 可调 Scene FPS
 - 可选 Scene Camera culling mask：所有 / 复制主相机 / 手动 Layer
 - 可见的飞行相机速度
 - 运行时性能指标
 - D3D11 命名共享纹理 Scene transport
-- 游戏端 / Viewer 端 DXGI adapter LUID 诊断
 - Viewer Scene GPU 原生显示，无 CPU readback
 - GPU 侧 Y flip 和等比例显示
 - English / 简体中文 Viewer UI
@@ -215,7 +230,7 @@ Scene 底部会显示轻量性能指标，用于根据实际测量结果优化�
 - Scene transport 当前要求 Direct3D 11
 - 新的、未缓存的 compatibility profile 首次仍需要本机 .NET SDK 编译 Agent
 - 特殊/自定义 Unity launcher 可能需要额外进程发现适配
-- 游戏仍需要额外执行 Viewer Scene Camera 的渲染；可以通过可调 FPS / 分辨率控制负载
+- 游戏仍需要额外执行 Viewer Scene Camera 的渲染；可以通过 Scene FPS / 分辨率设置控制负载
 - Hierarchy / Inspector 控制数据目前仍使用 Named Pipe + JSON；Scene 像素始终走 D3D11 shared texture
 - 尚未实现 picking、collider 可视化和 transform gizmo
 - 不使用 GitHub Actions；当前验证方式为本地手动验证
