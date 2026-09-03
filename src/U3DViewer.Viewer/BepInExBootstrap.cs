@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http;
+using System.Text;
 
 namespace U3DViewer.Viewer;
 
@@ -28,7 +29,7 @@ internal static class BepInExBootstrap
     {
         if (IsInstalled(executablePath))
         {
-            return new BepInExBootstrapResult(true, "BepInEx is already installed.");
+            return ApplyLowOverheadProfile(executablePath, "BepInEx is already installed.", progress);
         }
 
         if (backend is not ("Mono" or "IL2CPP"))
@@ -74,7 +75,7 @@ internal static class BepInExBootstrap
                 return new BepInExBootstrapResult(false, "BepInEx archive was extracted, but BepInEx.Core.dll was not found afterwards.");
             }
 
-            return new BepInExBootstrapResult(true, "BepInEx installed.");
+            return ApplyLowOverheadProfile(executablePath, "BepInEx installed.", progress);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -179,6 +180,105 @@ internal static class BepInExBootstrap
                 false,
                 "BepInEx did not finish IL2CPP interop generation within 2 minutes. Check BepInEx/LogOutput.log.");
         }
+    }
+
+    private static BepInExBootstrapResult ApplyLowOverheadProfile(
+        string executablePath,
+        string successMessage,
+        IProgress<string>? progress)
+    {
+        var gameDirectory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(gameDirectory))
+        {
+            return new BepInExBootstrapResult(false, "Game directory could not be resolved while configuring BepInEx.");
+        }
+
+        try
+        {
+            progress?.Report("Applying low-overhead BepInEx logging profile...");
+            var configDirectory = Path.Combine(gameDirectory, "BepInEx", "config");
+            Directory.CreateDirectory(configDirectory);
+            var configPath = Path.Combine(configDirectory, "BepInEx.cfg");
+            var config = File.Exists(configPath) ? File.ReadAllText(configPath) : string.Empty;
+
+            config = UpsertIniValue(config, "Logging", "UnityLogListening", "false");
+            config = UpsertIniValue(config, "Logging.Console", "Enabled", "false");
+            config = UpsertIniValue(config, "Logging.Disk", "Enabled", "true");
+            config = UpsertIniValue(config, "Logging.Disk", "WriteUnityLog", "false");
+            config = UpsertIniValue(config, "Logging.Disk", "InstantFlushing", "false");
+
+            File.WriteAllText(configPath, config, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            return new BepInExBootstrapResult(true, successMessage + " Low-overhead logging profile applied.");
+        }
+        catch (Exception ex)
+        {
+            return new BepInExBootstrapResult(false, $"BepInEx is installed, but its low-overhead logging profile could not be applied: {ex.Message}");
+        }
+    }
+
+    private static string UpsertIniValue(string text, string section, string key, string value)
+    {
+        var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var lines = normalized.Length == 0
+            ? new List<string>()
+            : normalized.Split('\n').ToList();
+        while (lines.Count > 0 && lines[^1].Length == 0)
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+
+        var header = $"[{section}]";
+        var sectionIndex = lines.FindIndex(line => string.Equals(line.Trim(), header, StringComparison.OrdinalIgnoreCase));
+        if (sectionIndex < 0)
+        {
+            if (lines.Count > 0)
+            {
+                lines.Add(string.Empty);
+            }
+            lines.Add(header);
+            lines.Add($"{key} = {value}");
+        }
+        else
+        {
+            var sectionEnd = lines.Count;
+            for (var index = sectionIndex + 1; index < lines.Count; index++)
+            {
+                var trimmed = lines[index].Trim();
+                if (trimmed.StartsWith('[', StringComparison.Ordinal) && trimmed.EndsWith(']', StringComparison.Ordinal))
+                {
+                    sectionEnd = index;
+                    break;
+                }
+            }
+
+            var keyIndex = -1;
+            for (var index = sectionIndex + 1; index < sectionEnd; index++)
+            {
+                var trimmed = lines[index].Trim();
+                if (trimmed.Length == 0 || trimmed.StartsWith('#') || trimmed.StartsWith(';'))
+                {
+                    continue;
+                }
+
+                var equalsIndex = trimmed.IndexOf('=');
+                if (equalsIndex > 0 && string.Equals(trimmed[..equalsIndex].Trim(), key, StringComparison.OrdinalIgnoreCase))
+                {
+                    keyIndex = index;
+                    break;
+                }
+            }
+
+            if (keyIndex >= 0)
+            {
+                lines[keyIndex] = $"{key} = {value}";
+            }
+            else
+            {
+                lines.Insert(sectionEnd, $"{key} = {value}");
+            }
+        }
+
+        return string.Join(Environment.NewLine, lines) + Environment.NewLine;
     }
 
     private static async Task StopBootstrapProcessAsync(Process process, CancellationToken cancellationToken)
