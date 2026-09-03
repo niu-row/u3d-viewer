@@ -37,8 +37,14 @@ internal static class JsonSnapshotWriter
             return;
         }
 
+        var transportReady = IsTransportReady(target);
+        var status = target.Available && !transportReady &&
+                     target.NativeBridgeAbiVersion == NativeBridgeProtocol.AbiVersion
+            ? "Waiting for NativeBridge to publish the first shared Scene frame."
+            : target.Status;
+
         sb.Append('{');
-        BoolProperty(sb, "available", target.Available); sb.Append(',');
+        BoolProperty(sb, "available", transportReady); sb.Append(',');
         Property(sb, "sharedName", target.SharedName); sb.Append(',');
         NumberProperty(sb, "width", target.Width); sb.Append(',');
         NumberProperty(sb, "height", target.Height); sb.Append(',');
@@ -63,8 +69,25 @@ internal static class JsonSnapshotWriter
             String(sb, target.LayerNames[i]);
         }
         sb.Append("],");
-        Property(sb, "status", target.Status);
+        Property(sb, "status", status);
         sb.Append('}');
+    }
+
+    private static bool IsTransportReady(RenderTargetInfo target)
+    {
+        if (!target.Available || target.NativeBridgeAbiVersion != NativeBridgeProtocol.AbiVersion)
+        {
+            return false;
+        }
+
+        try
+        {
+            return NativeBridge.U3DViewer_IsSceneWriterReady() != 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void WritePerformance(StringBuilder sb, PerformanceInfo performance)
