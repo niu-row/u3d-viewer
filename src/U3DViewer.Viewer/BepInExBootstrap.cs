@@ -45,10 +45,7 @@ internal static class BepInExBootstrap
 
         try
         {
-            var cacheDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "U3DViewer",
-                "Downloads");
+            var cacheDirectory = ViewerPaths.GetGameDownloadsDirectory(executablePath);
             Directory.CreateDirectory(cacheDirectory);
 
             var archiveName = backend == "Mono"
