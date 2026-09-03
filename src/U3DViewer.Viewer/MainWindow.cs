@@ -208,27 +208,37 @@ internal sealed class MainWindow : Window
             _pendingSnapshot = null;
         }
 
-        if (snapshot is not null)
+        try
         {
-            ApplySnapshot(snapshot);
-        }
-
-        var reschedule = false;
-        lock (_snapshotDispatchLock)
-        {
-            if (_pendingSnapshot is not null)
+            if (snapshot is not null)
             {
-                reschedule = true;
-            }
-            else
-            {
-                _snapshotDispatchScheduled = false;
+                ApplySnapshot(snapshot);
             }
         }
-
-        if (reschedule)
+        catch (Exception ex)
         {
-            Dispatcher.UIThread.Post(ApplyLatestSnapshot);
+            ViewerLog.Error($"Applying snapshot #{snapshot?.Sequence} to the UI failed.", ex);
+            _connectionDetail.Text = $"Snapshot UI update failed: {ex.Message}";
+        }
+        finally
+        {
+            var reschedule = false;
+            lock (_snapshotDispatchLock)
+            {
+                if (_pendingSnapshot is not null)
+                {
+                    reschedule = true;
+                }
+                else
+                {
+                    _snapshotDispatchScheduled = false;
+                }
+            }
+
+            if (reschedule)
+            {
+                Dispatcher.UIThread.Post(ApplyLatestSnapshot);
+            }
         }
     }
 
