@@ -369,7 +369,7 @@ internal static class AgentBuilder
         UnityReferenceSet references)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        AppendText(hash, "U3DViewer-Agent-Compatibility-v2");
+        AppendText(hash, "U3DViewer-Agent-Compatibility-v4");
         AppendText(hash, backend);
 
         var projectFolder = GetProjectFolder(backend);
@@ -444,12 +444,12 @@ internal static class AgentBuilder
         }
 
         files.AddRange(Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .Where(path => !IsBuildOutputPath(path)));
+            .Where(path => !IsBuildOutputPath(Path.GetRelativePath(directory, path))));
     }
 
-    private static bool IsBuildOutputPath(string path)
+    private static bool IsBuildOutputPath(string relativePath)
     {
-        var segments = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var segments = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return segments.Any(segment =>
             string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase) ||
