@@ -12,6 +12,8 @@ internal sealed class ScenePanel : Grid
 {
     private const int MinRenderSize = 64;
     private const int MaxRenderSize = 4096;
+    private const int ViewportResizeTolerance = 2;
+    private const double StatusFooterHeight = 48;
 
     private readonly Window _owner;
     private readonly Action<string> _sendCommand;
@@ -33,6 +35,7 @@ internal sealed class ScenePanel : Grid
     private SceneSettingsProfile? _savedProfile;
     private bool _savedProfileApplied;
     private bool _autoViewport = true;
+    private bool _autoViewportInitialized;
     private bool _followPosition;
     private bool _followRotation;
     private bool _updatingFollowControls;
@@ -58,7 +61,7 @@ internal sealed class ScenePanel : Grid
         _followPosition = _savedProfile?.FollowMainCameraPosition ?? false;
         _followRotation = _savedProfile?.FollowMainCameraRotation ?? false;
 
-        RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto");
+        RowDefinitions = new RowDefinitions($"Auto,Auto,*,{StatusFooterHeight}");
 
         Children.Add(new TextBlock
         {
@@ -123,21 +126,23 @@ internal sealed class ScenePanel : Grid
         _sceneStatus = new TextBlock
         {
             Text = Localization.T("main.waitTarget"),
-            TextWrapping = TextWrapping.Wrap,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
             TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12, 6, 12, 2),
+            Margin = new Thickness(12, 3, 12, 1),
             FontSize = 12
         };
         _performanceStatus = new TextBlock
         {
             Text = Localization.T("main.perfWaiting"),
-            TextWrapping = TextWrapping.Wrap,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
             TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12, 2, 12, 6),
+            Margin = new Thickness(12, 1, 12, 3),
             FontSize = 12,
             Opacity = 0.82
         };
@@ -157,12 +162,17 @@ internal sealed class ScenePanel : Grid
 
         var statusBorder = new Border
         {
+            Height = StatusFooterHeight,
             Background = new SolidColorBrush(Color.FromArgb(220, 24, 24, 24)),
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            Child = new StackPanel
+            Child = new Grid
             {
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                Children = { _sceneStatus, _performanceStatus }
+                RowDefinitions = new RowDefinitions("*,*"),
+                Children =
+                {
+                    _sceneStatus,
+                    PlaceInRow(_performanceStatus, 1)
+                }
             }
         };
         Grid.SetRow(statusBorder, 3);
@@ -205,8 +215,12 @@ internal sealed class ScenePanel : Grid
             }
         }
 
-        if (_autoViewport)
+        // SizeChanged is the normal source of auto-viewport updates. The first valid target
+        // needs one explicit synchronization because the host can be laid out before the
+        // Agent connects, when ScheduleViewportResize intentionally ignores size events.
+        if (_autoViewport && !_autoViewportInitialized)
         {
+            _autoViewportInitialized = true;
             ScheduleViewportResize(_sceneHost.Bounds.Size);
         }
     }
@@ -215,6 +229,7 @@ internal sealed class ScenePanel : Grid
     {
         _latestTarget = null;
         _savedProfileApplied = false;
+        _autoViewportInitialized = false;
         _requestedAutoWidth = 0;
         _requestedAutoHeight = 0;
         _resizeDebounce.Stop();
@@ -342,6 +357,7 @@ internal sealed class ScenePanel : Grid
             profile.OrthographicSize));
 
         _autoViewport = profile.AutoViewport;
+        _autoViewportInitialized = false;
         _requestedAutoWidth = 0;
         _requestedAutoHeight = 0;
 
@@ -358,6 +374,7 @@ internal sealed class ScenePanel : Grid
                 size.Item2));
             _requestedAutoWidth = size.Item1;
             _requestedAutoHeight = size.Item2;
+            _autoViewportInitialized = true;
         }
         else
         {
@@ -444,10 +461,11 @@ internal sealed class ScenePanel : Grid
         }
 
         var size = NormalizeViewportSize(_pendingViewportSize);
-        if (size.Width == target.Width && size.Height == target.Height)
+        if (WithinViewportTolerance(size.Width, target.Width) &&
+            WithinViewportTolerance(size.Height, target.Height))
         {
-            _requestedAutoWidth = 0;
-            _requestedAutoHeight = 0;
+            _requestedAutoWidth = target.Width;
+            _requestedAutoHeight = target.Height;
             return;
         }
 
@@ -456,6 +474,8 @@ internal sealed class ScenePanel : Grid
             return;
         }
 
+        ViewerLog.Info(
+            $"Scene auto viewport resize requested: {target.Width}x{target.Height} -> {size.Width}x{size.Height}.");
         _requestedAutoWidth = size.Width;
         _requestedAutoHeight = size.Height;
         _sendCommand(ViewerCommandCodec.EncodeCameraStreamSettings(
@@ -464,6 +484,9 @@ internal sealed class ScenePanel : Grid
             size.Width,
             size.Height));
     }
+
+    private static bool WithinViewportTolerance(int a, int b) =>
+        Math.Abs(a - b) <= ViewportResizeTolerance;
 
     private static (int Width, int Height) NormalizeViewportSize(Size size)
     {
@@ -501,6 +524,13 @@ internal sealed class ScenePanel : Grid
         var button = CreateCommandButton(text, action);
         button.Margin = new Thickness(3);
         return button;
+    }
+
+    private static T PlaceInRow<T>(T control, int row)
+        where T : Control
+    {
+        Grid.SetRow(control, row);
+        return control;
     }
 
     private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
