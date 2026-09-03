@@ -364,8 +364,8 @@ internal sealed class ScenePanel : Grid
                 : $"{performance.SnapshotBytes} B";
 
         _performanceStatus.Text = Localization.IsChinese
-            ? $"性能 · 渲染 {performance.SceneRenderMs:0.00} ms · 层级 {performance.HierarchyNodes} 节点 / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}"
-            : $"Perf · Render {performance.SceneRenderMs:0.00} ms · Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
+            ? $"性能 · 游戏 {performance.GameFps:0.0} FPS · Scene {performance.SceneFps:0.0} FPS · 渲染 {performance.SceneRenderMs:0.00} ms · 层级 {performance.HierarchyNodes} 节点 / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}"
+            : $"Perf · Game {performance.GameFps:0.0} FPS · Scene {performance.SceneFps:0.0} FPS · Render {performance.SceneRenderMs:0.00} ms · Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
     }
 
     private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
