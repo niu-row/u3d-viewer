@@ -7,10 +7,10 @@ namespace U3DViewer.Agent.IL2CPP;
 
 internal sealed class SceneCameraController : IDisposable
 {
-    private const int RenderWidth = 1280;
-    private const int RenderHeight = 720;
-    private const float IdleRenderInterval = 1f / 15f;
-    private const float InteractiveRenderInterval = 1f / 30f;
+    private const int DefaultRenderWidth = 1280;
+    private const int DefaultRenderHeight = 720;
+    private const float DefaultIdleFps = 15f;
+    private const float DefaultInteractiveFps = 30f;
     private const float InteractiveHoldSeconds = 0.2f;
     private const float DefaultPerspectiveFov = 60f;
     private const float MinPerspectiveNear = 0.001f;
@@ -19,11 +19,20 @@ internal sealed class SceneCameraController : IDisposable
     private const float DefaultPerspectiveFar = 10000f;
     private const float MinOrthographicSize = 0.001f;
     private const float MinClipSeparation = 0.0001f;
+    private const float MinStreamFps = 1f;
+    private const float MaxStreamFps = 120f;
+    private const int MinRenderDimension = 64;
+    private const int MaxRenderDimension = 4096;
 
     private GameObject? _cameraObject;
     private Camera? _camera;
     private RenderTexture? _renderTexture;
     private float _moveSpeed = 10f;
+    private float _idleFps = DefaultIdleFps;
+    private float _interactiveFps = DefaultInteractiveFps;
+    private int _renderWidth = DefaultRenderWidth;
+    private int _renderHeight = DefaultRenderHeight;
+    private int _renderGeneration;
     private float _nextRenderAt;
     private float _interactiveUntil;
     private bool _bridgeReady;
@@ -36,6 +45,10 @@ internal sealed class SceneCameraController : IDisposable
     private string _sourceProjectionInfo = "Source Camera: unavailable";
     private float _preferredOrthographicSize = 5f;
     private string _renderStatus = "Scene Camera has not initialized yet.";
+    private double _lastRenderMs;
+    private double _averageRenderMs;
+    private double _maxRenderMs;
+    private long _renderSamples;
 
     public void Apply(ViewerCommand command)
     {
@@ -76,6 +89,9 @@ internal sealed class SceneCameraController : IDisposable
                 ApplyLens(camera, command.X, command.Y, command.Z, command.Value);
                 BoostInteractiveRender();
                 break;
+            case ViewerCommandKind.CameraStreamSettings:
+                ApplyStreamSettings(command.X, command.Y, (int)command.Z, (int)command.Value);
+                break;
             case ViewerCommandKind.CameraReset:
                 CopyFromGameCamera();
                 BoostInteractiveRender();
@@ -102,15 +118,15 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
-        var interval = now < _interactiveUntil
-            ? InteractiveRenderInterval
-            : IdleRenderInterval;
-        _nextRenderAt = now + interval;
+        var fps = now < _interactiveUntil ? _interactiveFps : _idleFps;
+        _nextRenderAt = now + 1f / Mathf.Max(MinStreamFps, fps);
 
+        var started = Stopwatch.GetTimestamp();
         try
         {
             _camera.Render();
             GL.IssuePluginEvent(_renderEvent, _copyEventId);
+            RecordRenderTiming(ElapsedMilliseconds(started));
         }
         catch (Exception ex)
         {
@@ -133,8 +149,8 @@ internal sealed class SceneCameraController : IDisposable
         {
             Available = _bridgeReady,
             SharedName = _sharedName,
-            Width = RenderWidth,
-            Height = RenderHeight,
+            Width = _renderWidth,
+            Height = _renderHeight,
             DxgiFormat = _dxgiFormat,
             AdapterLuid = _adapterLuid,
             AdapterName = _adapterName,
@@ -143,8 +159,18 @@ internal sealed class SceneCameraController : IDisposable
             NearClipPlane = camera?.nearClipPlane ?? MinPerspectiveNear,
             FarClipPlane = camera?.farClipPlane ?? DefaultPerspectiveFar,
             OrthographicSize = camera?.orthographicSize ?? _preferredOrthographicSize,
+            MoveSpeed = _moveSpeed,
+            IdleFps = _idleFps,
+            InteractiveFps = _interactiveFps,
             Status = $"{_renderStatus} {_sourceProjectionInfo} -> {projection}."
         };
+    }
+
+    public void PopulatePerformance(PerformanceInfo performance)
+    {
+        performance.SceneRenderMs = _lastRenderMs;
+        performance.SceneRenderAverageMs = _averageRenderMs;
+        performance.SceneRenderMaxMs = _maxRenderMs;
     }
 
     private void EnsureCamera()
@@ -164,15 +190,80 @@ internal sealed class SceneCameraController : IDisposable
         _camera.farClipPlane = DefaultPerspectiveFar;
         _camera.fieldOfView = DefaultPerspectiveFov;
 
-        _renderTexture = new RenderTexture(RenderWidth, RenderHeight, 24, RenderTextureFormat.ARGB32)
+        CreateRenderTexture(_renderWidth, _renderHeight);
+        CopyFromGameCamera();
+        TryInitializeBridge();
+    }
+
+    private void ApplyStreamSettings(float idleFps, float interactiveFps, int width, int height)
+    {
+        _idleFps = Mathf.Clamp(SanitizeFinite(idleFps, DefaultIdleFps), MinStreamFps, MaxStreamFps);
+        _interactiveFps = Mathf.Clamp(SanitizeFinite(interactiveFps, DefaultInteractiveFps), MinStreamFps, MaxStreamFps);
+
+        width = Math.Clamp(width, MinRenderDimension, MaxRenderDimension);
+        height = Math.Clamp(height, MinRenderDimension, MaxRenderDimension);
+
+        if (width != _renderWidth || height != _renderHeight)
+        {
+            RecreateRenderTexture(width, height);
+        }
+
+        BoostInteractiveRender();
+    }
+
+    private void RecreateRenderTexture(int width, int height)
+    {
+        if (_camera is null)
+        {
+            _renderWidth = width;
+            _renderHeight = height;
+            return;
+        }
+
+        _bridgeReady = false;
+        _renderEvent = IntPtr.Zero;
+
+        try
+        {
+            NativeBridge.U3DViewer_Reset();
+        }
+        catch
+        {
+            // The bridge may not have initialized yet.
+        }
+
+        _camera.targetTexture = null;
+        ReleaseRenderTexture();
+        _renderWidth = width;
+        _renderHeight = height;
+        _renderGeneration++;
+        CreateRenderTexture(width, height);
+        TryInitializeBridge();
+    }
+
+    private void CreateRenderTexture(int width, int height)
+    {
+        _renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
         {
             name = "__U3DViewerRenderTexture"
         };
         _renderTexture.Create();
-        _camera.targetTexture = _renderTexture;
+        if (_camera is not null)
+        {
+            _camera.targetTexture = _renderTexture;
+        }
+    }
 
-        CopyFromGameCamera();
-        TryInitializeBridge();
+    private void ReleaseRenderTexture()
+    {
+        if (_renderTexture is null)
+        {
+            return;
+        }
+
+        _renderTexture.Release();
+        UnityEngine.Object.Destroy(_renderTexture);
+        _renderTexture = null;
     }
 
     private void TryInitializeBridge()
@@ -190,7 +281,7 @@ internal sealed class SceneCameraController : IDisposable
 
         try
         {
-            _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}";
+            _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}.{_renderGeneration}";
             var nativeTexture = _renderTexture.GetNativeTexturePtr();
             if (nativeTexture == IntPtr.Zero)
             {
@@ -227,6 +318,17 @@ internal sealed class SceneCameraController : IDisposable
             _renderStatus = $"NativeBridge initialization failed: {ex.Message}";
         }
     }
+
+    private void RecordRenderTiming(double milliseconds)
+    {
+        _lastRenderMs = milliseconds;
+        _renderSamples++;
+        _averageRenderMs += (milliseconds - _averageRenderMs) / _renderSamples;
+        _maxRenderMs = Math.Max(_maxRenderMs, milliseconds);
+    }
+
+    private static double ElapsedMilliseconds(long started) =>
+        (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
 
     private void BoostInteractiveRender()
     {
@@ -427,12 +529,7 @@ internal sealed class SceneCameraController : IDisposable
             _camera.targetTexture = null;
         }
 
-        if (_renderTexture is not null)
-        {
-            _renderTexture.Release();
-            UnityEngine.Object.Destroy(_renderTexture);
-            _renderTexture = null;
-        }
+        ReleaseRenderTexture();
 
         if (_cameraObject is not null)
         {
