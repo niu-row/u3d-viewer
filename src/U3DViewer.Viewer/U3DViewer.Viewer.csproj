@@ -13,6 +13,17 @@
     <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\U3DViewer.Agent.Mono\bin\$(Configuration)\netstandard2.0\U3DViewer.Agent.Mono.dll"
+          Link="payload\Mono\U3DViewer.Agent.Mono.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\U3DViewer.Agent.Mono\bin\$(Configuration)\netstandard2.0\U3DViewer.Agent.Mono.dll')" />
+    <None Include="..\U3DViewer.Agent.IL2CPP\bin\$(Configuration)\net6.0\U3DViewer.Agent.IL2CPP.dll"
+          Link="payload\IL2CPP\U3DViewer.Agent.IL2CPP.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\U3DViewer.Agent.IL2CPP\bin\$(Configuration)\net6.0\U3DViewer.Agent.IL2CPP.dll')" />
+  </ItemGroup>
+
   <Target Name="CopyLocalNativeBridge" AfterTargets="Build">
     <PropertyGroup>
       <NativeBridgePath>$(MSBuildProjectDirectory)\..\..\build\native\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgePath>

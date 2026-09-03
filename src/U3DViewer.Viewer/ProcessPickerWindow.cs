@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 
 namespace U3DViewer.Viewer;
@@ -13,20 +14,23 @@ internal sealed class ProcessPickerWindow : Window
     private readonly Action<UnityProcessInfo> _connect;
     private readonly ObservableCollection<UnityProcessInfo> _processes = new();
     private readonly ListBox _list;
-    private readonly Button _connectButton;
+    private readonly Button _actionButton;
+    private readonly Button _openGameButton;
+    private readonly Button _refreshButton;
     private readonly TextBlock _summary;
     private readonly DispatcherTimer _refreshTimer = new();
     private bool _refreshing;
+    private bool _operating;
 
     public ProcessPickerWindow(Action<UnityProcessInfo> connect)
     {
         _connect = connect;
 
         Title = "U3D Viewer - Select Unity Process";
-        Width = 980;
-        Height = 560;
-        MinWidth = 760;
-        MinHeight = 420;
+        Width = 1040;
+        Height = 580;
+        MinWidth = 820;
+        MinHeight = 440;
 
         _list = new ListBox
         {
@@ -36,18 +40,34 @@ internal sealed class ProcessPickerWindow : Window
         };
         _list.SelectionChanged += (_, _) => UpdateSelection();
 
-        _connectButton = new Button
+        _actionButton = new Button
         {
-            Content = "Connect",
+            Content = "Select a process",
             IsEnabled = false,
-            MinWidth = 100
+            MinWidth = 130
         };
-        _connectButton.Click += (_, _) => ConnectSelected();
+        _actionButton.Click += async (_, _) => await RunSelectedActionAsync();
+
+        _openGameButton = new Button
+        {
+            Content = "Open Game…",
+            MinWidth = 110
+        };
+        _openGameButton.Click += async (_, _) => await OpenGameAsync();
+
+        _refreshButton = new Button
+        {
+            Content = "Refresh",
+            MinWidth = 90,
+            Margin = new Thickness(8, 0)
+        };
+        _refreshButton.Click += async (_, _) => await RefreshAsync();
 
         _summary = new TextBlock
         {
             Text = "Scanning running processes...",
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
         };
 
         Content = BuildLayout();
@@ -73,7 +93,7 @@ internal sealed class ProcessPickerWindow : Window
 
         root.Children.Add(new TextBlock
         {
-            Text = "Select a running Unity game",
+            Text = "Select or launch a Unity game",
             FontSize = 22,
             FontWeight = FontWeight.SemiBold,
             Margin = new Thickness(0, 0, 0, 4)
@@ -81,7 +101,7 @@ internal sealed class ProcessPickerWindow : Window
 
         var description = new TextBlock
         {
-            Text = "All detected Unity standalone processes are listed. Only processes with a ready U3DViewer Agent can be connected.",
+            Text = "Ready Agents attach immediately. For a detected game without an Agent, U3DViewer can install the bundled Agent and restart the game. Open Game… can deploy and launch a Unity executable directly.",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
         };
@@ -107,23 +127,19 @@ internal sealed class ProcessPickerWindow : Window
 
         var footer = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"),
             Margin = new Thickness(0, 12, 0, 0)
         };
         footer.Children.Add(_summary);
 
-        var refresh = new Button
-        {
-            Content = "Refresh",
-            MinWidth = 90,
-            Margin = new Thickness(8, 0)
-        };
-        refresh.Click += async (_, _) => await RefreshAsync();
-        Grid.SetColumn(refresh, 1);
-        footer.Children.Add(refresh);
+        Grid.SetColumn(_openGameButton, 1);
+        footer.Children.Add(_openGameButton);
 
-        Grid.SetColumn(_connectButton, 2);
-        footer.Children.Add(_connectButton);
+        Grid.SetColumn(_refreshButton, 2);
+        footer.Children.Add(_refreshButton);
+
+        Grid.SetColumn(_actionButton, 3);
+        footer.Children.Add(_actionButton);
 
         Grid.SetRow(footer, 3);
         root.Children.Add(footer);
@@ -189,7 +205,7 @@ internal sealed class ProcessPickerWindow : Window
 
     private async Task RefreshAsync()
     {
-        if (_refreshing)
+        if (_refreshing || _operating)
         {
             return;
         }
@@ -227,18 +243,149 @@ internal sealed class ProcessPickerWindow : Window
 
     private void UpdateSelection()
     {
-        var selected = _list.SelectedItem as UnityProcessInfo;
-        _connectButton.IsEnabled = selected?.AgentStatus == AgentProcessStatus.Ready;
+        if (_operating)
+        {
+            _actionButton.IsEnabled = false;
+            return;
+        }
+
+        if (_list.SelectedItem is not UnityProcessInfo selected)
+        {
+            _actionButton.Content = "Select a process";
+            _actionButton.IsEnabled = false;
+            return;
+        }
+
+        switch (selected.AgentStatus)
+        {
+            case AgentProcessStatus.Ready:
+                _actionButton.Content = "Attach";
+                _actionButton.IsEnabled = true;
+                _summary.Text = $"{selected.ProcessName} · PID {selected.ProcessId} · Agent ready";
+                break;
+
+            case AgentProcessStatus.Busy:
+                _actionButton.Content = "Agent Busy";
+                _actionButton.IsEnabled = false;
+                _summary.Text = "This Agent is already connected to another Viewer.";
+                break;
+
+            default:
+                if (GameAutomation.CanInstall(selected, out var reason))
+                {
+                    _actionButton.Content = "Install + Restart";
+                    _actionButton.IsEnabled = true;
+                    _summary.Text = $"Agent not loaded. {selected.Backend} payload is available; install and restart can be automated.";
+                }
+                else
+                {
+                    _actionButton.Content = "Install unavailable";
+                    _actionButton.IsEnabled = false;
+                    _summary.Text = reason;
+                }
+                break;
+        }
     }
 
-    private void ConnectSelected()
+    private async Task RunSelectedActionAsync()
     {
-        if (_list.SelectedItem is not UnityProcessInfo selected || selected.AgentStatus != AgentProcessStatus.Ready)
+        if (_list.SelectedItem is not UnityProcessInfo selected)
         {
             return;
         }
 
+        if (selected.AgentStatus == AgentProcessStatus.Ready)
+        {
+            _refreshTimer.Stop();
+            _connect(selected);
+            return;
+        }
+
+        if (selected.AgentStatus != AgentProcessStatus.NotDetected)
+        {
+            return;
+        }
+
+        await RunAutomationAsync(
+            "Installing Agent and restarting game...",
+            token => GameAutomation.InstallAndRestartAsync(selected, token));
+    }
+
+    private async Task OpenGameAsync()
+    {
+        if (_operating)
+        {
+            return;
+        }
+
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Open Unity game",
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Windows executable")
+                {
+                    Patterns = new[] { "*.exe" }
+                }
+            }
+        });
+
+        var executablePath = files.FirstOrDefault()?.TryGetLocalPath();
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            return;
+        }
+
+        await RunAutomationAsync(
+            $"Deploying Agent and launching {Path.GetFileName(executablePath)}...",
+            token => GameAutomation.InstallLaunchAndWaitAsync(executablePath, token));
+    }
+
+    private async Task RunAutomationAsync(
+        string status,
+        Func<CancellationToken, Task<GameAutomationResult>> action)
+    {
+        _operating = true;
         _refreshTimer.Stop();
-        _connect(selected);
+        _actionButton.IsEnabled = false;
+        _openGameButton.IsEnabled = false;
+        _refreshButton.IsEnabled = false;
+        _list.IsEnabled = false;
+        _summary.Text = status;
+
+        try
+        {
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            var result = await action(cancellation.Token);
+            if (result.Success && result.Target is not null)
+            {
+                _summary.Text = "Agent ready. Opening Viewer...";
+                _connect(result.Target);
+                return;
+            }
+
+            _summary.Text = result.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            _summary.Text = "Operation timed out.";
+        }
+        catch (Exception ex)
+        {
+            _summary.Text = $"Operation failed: {ex.Message}";
+        }
+        finally
+        {
+            _operating = false;
+            _openGameButton.IsEnabled = true;
+            _refreshButton.IsEnabled = true;
+            _list.IsEnabled = true;
+            if (IsVisible)
+            {
+                _refreshTimer.Start();
+                await RefreshAsync();
+            }
+        }
     }
 }

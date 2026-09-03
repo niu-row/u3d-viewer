@@ -41,33 +41,13 @@ internal static class UnityProcessDiscovery
             try
             {
                 var executablePath = process.MainModule?.FileName;
-                if (string.IsNullOrWhiteSpace(executablePath))
+                if (string.IsNullOrWhiteSpace(executablePath) ||
+                    !TryInspectExecutable(executablePath, out var backend))
                 {
                     continue;
                 }
 
-                var directory = Path.GetDirectoryName(executablePath);
-                if (string.IsNullOrWhiteSpace(directory))
-                {
-                    continue;
-                }
-
-                var executableName = Path.GetFileNameWithoutExtension(executablePath);
-                var dataDirectory = Path.Combine(directory, executableName + "_Data");
-                var unityPlayer = Path.Combine(directory, "UnityPlayer.dll");
-                var globalGameManagers = Path.Combine(dataDirectory, "globalgamemanagers");
-
-                // Requiring the executable-specific _Data directory avoids false positives
-                // such as UnityCrashHandler64.exe living beside UnityPlayer.dll.
-                if (!Directory.Exists(dataDirectory) ||
-                    (!File.Exists(unityPlayer) && !File.Exists(globalGameManagers)))
-                {
-                    continue;
-                }
-
-                var backend = DetectBackend(directory, dataDirectory);
                 var pipeName = $"u3d-viewer-{process.Id}";
-
                 result.Add(new UnityProcessInfo
                 {
                     ProcessId = process.Id,
@@ -93,6 +73,38 @@ internal static class UnityProcessDiscovery
             .ThenBy(item => item.ProcessName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.ProcessId)
             .ToArray();
+    }
+
+    public static bool TryInspectExecutable(string executablePath, out string backend)
+    {
+        backend = "Unknown";
+        if (!File.Exists(executablePath) ||
+            !string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return false;
+        }
+
+        var executableName = Path.GetFileNameWithoutExtension(executablePath);
+        var dataDirectory = Path.Combine(directory, executableName + "_Data");
+        var unityPlayer = Path.Combine(directory, "UnityPlayer.dll");
+        var globalGameManagers = Path.Combine(dataDirectory, "globalgamemanagers");
+
+        // Requiring the executable-specific _Data directory avoids false positives
+        // such as UnityCrashHandler64.exe living beside UnityPlayer.dll.
+        if (!Directory.Exists(dataDirectory) ||
+            (!File.Exists(unityPlayer) && !File.Exists(globalGameManagers)))
+        {
+            return false;
+        }
+
+        backend = DetectBackend(directory, dataDirectory);
+        return true;
     }
 
     private static string DetectBackend(string gameDirectory, string dataDirectory)
