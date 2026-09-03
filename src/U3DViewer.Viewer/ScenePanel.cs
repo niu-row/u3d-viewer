@@ -20,6 +20,7 @@ internal sealed class ScenePanel : Grid
     private readonly TextBlock _sceneStatus;
     private readonly TextBlock _performanceStatus;
     private readonly TextBlock _moveSpeedStatus;
+    private readonly Button _settingsButton;
     private readonly DispatcherTimer _resizeDebounce = new();
 
     private RenderTargetInfo? _latestTarget;
@@ -56,6 +57,8 @@ internal sealed class ScenePanel : Grid
             FontWeight = FontWeight.SemiBold
         };
 
+        _settingsButton = CreateCommandButton(SettingsLabel(), ShowSettings);
+
         var commands = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -71,7 +74,7 @@ internal sealed class ScenePanel : Grid
             Localization.T("main.orthographic"),
             () => _sendCommand(ViewerCommandCodec.EncodeCameraProjection(true))));
         commands.Children.Add(CreateCommandButton(Localization.T("main.focusSelected"), FocusSelected));
-        commands.Children.Add(CreateCommandButton(Localization.T("main.sceneSettings"), ShowSettings));
+        commands.Children.Add(_settingsButton);
 
         var toolbar = new Grid
         {
@@ -138,6 +141,8 @@ internal sealed class ScenePanel : Grid
             _resizeDebounce.Stop();
             ApplyAutoViewportSize();
         };
+
+        Localization.LanguageChanged += OnLanguageChanged;
     }
 
     public void ApplySnapshot(RenderTargetInfo? target, PerformanceInfo performance)
@@ -169,8 +174,18 @@ internal sealed class ScenePanel : Grid
 
     public void Shutdown()
     {
+        Localization.LanguageChanged -= OnLanguageChanged;
         _resizeDebounce.Stop();
         _sceneHost.Shutdown();
+    }
+
+    private void OnLanguageChanged()
+    {
+        _settingsButton.Content = SettingsLabel();
+        if (_latestTarget is not null)
+        {
+            _moveSpeedStatus.Text = Localization.Translate($"Speed {_latestTarget.MoveSpeed:0.##} u/s");
+        }
     }
 
     private void FocusSelected()
@@ -211,14 +226,17 @@ internal sealed class ScenePanel : Grid
 
         if (_autoViewport)
         {
-            var size = NormalizeViewportSize(_sceneHost.Bounds.Size);
+            var rawSize = _sceneHost.Bounds.Size;
+            var size = rawSize.Width >= 1 && rawSize.Height >= 1
+                ? NormalizeViewportSize(rawSize)
+                : (_latestTarget?.Width ?? values.Width, _latestTarget?.Height ?? values.Height);
             _sendCommand(ViewerCommandCodec.EncodeCameraStreamSettings(
                 values.IdleFps,
                 values.InteractiveFps,
-                size.Width,
-                size.Height));
-            _requestedAutoWidth = size.Width;
-            _requestedAutoHeight = size.Height;
+                size.Item1,
+                size.Item2));
+            _requestedAutoWidth = size.Item1;
+            _requestedAutoHeight = size.Item2;
         }
         else
         {
@@ -291,11 +309,12 @@ internal sealed class ScenePanel : Grid
                 ? $"{performance.SnapshotBytes / 1024.0:0.0} KB"
                 : $"{performance.SnapshotBytes} B";
 
-        _performanceStatus.Text = Localization.Translate(
-            $"Perf · Render {performance.SceneRenderMs:0.00} ms · " +
-            $"Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms · " +
-            $"JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}");
+        _performanceStatus.Text = Localization.IsChinese
+            ? $"性能 · 渲染 {performance.SceneRenderMs:0.00} ms · 层级 {performance.HierarchyNodes} 节点 / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}"
+            : $"Perf · Render {performance.SceneRenderMs:0.00} ms · Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
     }
+
+    private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
 
     private static Button CreateCommandButton(string text, Action action)
     {
