@@ -9,32 +9,59 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        var lifetime = new ClassicDesktopStyleApplicationLifetime
+        ViewerLog.Initialize();
+
+        AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
         {
-            Args = args
+            var exception = eventArgs.ExceptionObject as Exception;
+            ViewerLog.Error(
+                $"Unhandled AppDomain exception. IsTerminating={eventArgs.IsTerminating}",
+                exception);
         };
 
-        AppBuilder.Configure<Application>()
-            .UsePlatformDetect()
-            .AfterSetup(builder => builder.Instance?.Styles.Add(new FluentTheme()))
-            .SetupWithLifetime(lifetime);
-
-        ProcessPickerWindow? picker = null;
-        picker = new ProcessPickerWindow(target =>
+        TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
         {
-            ViewerSession.Target = target;
+            ViewerLog.Error("Unobserved task exception.", eventArgs.Exception);
+            eventArgs.SetObserved();
+        };
 
-            var mainWindow = new MainWindow
+        try
+        {
+            var lifetime = new ClassicDesktopStyleApplicationLifetime
             {
-                Title = $"U3D Viewer — {target.ProcessName} ({target.ProcessId})"
+                Args = args
             };
 
-            lifetime.MainWindow = mainWindow;
-            mainWindow.Show();
-            picker?.Close();
-        });
+            AppBuilder.Configure<Application>()
+                .UsePlatformDetect()
+                .AfterSetup(builder => builder.Instance?.Styles.Add(new FluentTheme()))
+                .SetupWithLifetime(lifetime);
 
-        lifetime.MainWindow = picker;
-        return lifetime.Start(args);
+            ProcessPickerWindow? picker = null;
+            picker = new ProcessPickerWindow(target =>
+            {
+                ViewerLog.Info($"Opening Viewer for {target.ProcessName} (PID {target.ProcessId}, {target.Backend}).");
+                ViewerSession.Target = target;
+
+                var mainWindow = new MainWindow
+                {
+                    Title = $"U3D Viewer — {target.ProcessName} ({target.ProcessId})"
+                };
+
+                lifetime.MainWindow = mainWindow;
+                mainWindow.Show();
+                picker?.Close();
+            });
+
+            lifetime.MainWindow = picker;
+            var exitCode = lifetime.Start(args);
+            ViewerLog.Info($"U3DViewer exited with code {exitCode}.");
+            return exitCode;
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.Error("Fatal Viewer startup/runtime error.", ex);
+            return 1;
+        }
     }
 }
