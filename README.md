@@ -138,11 +138,14 @@ U3DViewer.Viewer.exe
 └─ Scene View
    └─ Avalonia NativeControlHost
       └─ Win32 child HWND
-         └─ D3D11 swap chain
-            └─ samples the named shared texture directly on the game GPU adapter
+         └─ dedicated presenter thread
+            └─ D3D11 swap chain
+               └─ samples the named shared texture directly on the game GPU adapter
 ```
 
 The active Scene presentation path does not perform GPU-to-CPU staging readback. The Viewer opens the named shared texture on the same DXGI adapter LUID, samples it in a small D3D11 shader, performs the Unity RenderTexture Y flip on the GPU, and presents directly into the embedded HWND swap chain.
+
+Open/close/present calls are serialized on one dedicated Viewer presenter thread. Interactive window sizing pauses presentation and recreates the presenter after the final size settles. The hot `Present` path does not call `ResizeBuffers`; DXGI may temporarily stretch the existing backbuffer while the HWND is changing size, then a fresh swap chain is opened at the final dimensions.
 
 Hierarchy discovery is lazy: scene roots are loaded first and child branches are scanned only when expanded. Unity API work remains on the Unity main thread and is spread across frames with a small per-frame budget. Snapshot JSON serialization runs off the Unity main thread.
 
@@ -160,9 +163,13 @@ Mouse wheel     adjust fly speed
 F               focus selected GameObject
 ```
 
-The current fly speed is shown in the Scene toolbar and updates immediately when the mouse wheel changes it.
+The current fly speed is shown in the Scene toolbar and updates immediately when the mouse wheel changes it. Perspective and Orthographic are mutually exclusive toolbar states and follow the actual Agent projection state.
 
-The main Scene toolbar keeps only high-frequency controls. Lens, stream, resolution, and culling settings live in the separate Scene Settings window.
+The Scene toolbar also provides independent `Follow Position` and `Follow Rotation` toggles. When enabled, the Scene Camera copies only the selected transform component from the current `Camera.main` immediately before a Scene render. Enabling both follows the full main-camera transform while leaving FOV, projection, clipping planes, and culling under U3DViewer control. These toggles are persisted per game.
+
+The Agent can create the Scene Camera before the game's `Camera.main` is ready. After the first usable render target arrives, the Viewer automatically sends one camera reset so initial position/orientation is synchronized without requiring a manual Reset Camera click.
+
+The main Scene toolbar keeps only high-frequency controls. Lens, stream, resolution, and culling settings live in the separate Scene Settings window. Toolbar content wraps on narrow layouts instead of forcing one long horizontal row.
 
 Default stream behavior is:
 
@@ -175,16 +182,20 @@ Manual fallback 1280 x 720
 
 With automatic viewport matching enabled, the Unity RenderTexture follows the actual Scene View width, height, and aspect ratio. Viewer resize events are debounced before recreating the shared texture. Disable automatic matching to use a fixed width/height from 64 to 4096.
 
-Scene settings are persisted per game in `<Game>/U3DViewer/Settings/scene.json`. The saved profile includes FOV, near/far clipping planes, orthographic size, idle/active FPS, automatic/manual resolution settings, and culling mode/mask.
+Scene settings are persisted per game in `<Game>/U3DViewer/Settings/scene.json`. The saved profile includes FOV, near/far clipping planes, orthographic size, idle/active FPS, automatic/manual resolution settings, culling mode/mask, and the two main-camera follow toggles.
 
 Changing Scene resolution recreates the Unity RenderTexture and D3D11 shared texture. The Agent immediately refreshes Scene target state after a stream change so the Viewer does not wait for the normal one-second snapshot cadence before opening the new shared texture.
 
 Scene Camera culling is configurable independently of the game view. `All` renders all 32 Unity Layers, `Copy Main Camera` follows the current `Camera.main.cullingMask` at snapshot cadence, and `Manual` opens a 32-Layer checklist using the target game's Layer names. `Copy Main Camera` remains the default when no per-game profile exists.
 
+The Hierarchy and Inspector columns are resizable with splitters so the Scene View can take the remaining workspace width.
+
 ## Performance metrics
 
 The Scene footer reports lightweight current metrics:
 
+- actual Unity game FPS over a short rolling window;
+- actual U3DViewer Scene Camera render FPS;
 - Scene `Camera.Render()` CPU-side submission time;
 - lazy Hierarchy nodes scanned and scan time;
 - snapshot JSON serialization time;
@@ -204,15 +215,19 @@ The Agent also retains average/maximum timing counters internally. The Scene ren
 - per-game persistent Scene settings
 - lazy live Runtime Hierarchy
 - read-only Runtime Inspector
+- resizable Hierarchy / Scene / Inspector workspace
 - Unity-style Scene fly camera controls
-- adjustable Perspective/Orthographic Scene lens
+- adjustable Perspective/Orthographic Scene lens with visible active projection state
+- automatic initial main-camera pose reset
+- independent follow-main-camera position / rotation toggles
 - automatic free-aspect Scene RenderTexture sizing or fixed manual resolution
 - adjustable Scene FPS
 - selectable Scene Camera culling mask: All / Copy Main Camera / Manual Layers
 - visible fly-camera speed
-- runtime performance metrics
+- game FPS / Scene FPS / runtime performance metrics
 - D3D11 Scene View transport through a named shared texture
 - GPU-native Viewer Scene presentation with no CPU readback
+- dedicated Scene presenter thread and resize recovery
 - GPU-side Y flip and aspect-preserving presentation
 - English / Simplified Chinese Viewer UI
 
