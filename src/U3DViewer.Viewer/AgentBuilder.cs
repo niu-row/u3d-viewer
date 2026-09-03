@@ -161,23 +161,30 @@ internal static class AgentBuilder
 
         if (!TryResolveUnityReferences(executablePath, backend, out var references, out var referenceError))
         {
+            ViewerLog.Error(referenceError);
             return new AgentBuildResult(false, referenceError);
         }
+
+        ViewerLog.Info($"Resolved {backend} Unity core reference: {references!.CorePath}");
+        ViewerLog.Info($"Resolved {backend} Unity scene reference: {references.ScenePath}");
 
         string fingerprint;
         try
         {
             progress?.Report($"Checking {backend} Agent compatibility cache...");
-            fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, references!);
+            fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, references);
+            ViewerLog.Info($"{backend} compatibility fingerprint: {fingerprint}");
         }
         catch (Exception ex)
         {
+            ViewerLog.Error("Could not fingerprint the selected game's Unity runtime.", ex);
             return new AgentBuildResult(false, $"Could not fingerprint the selected game's Unity runtime: {ex.Message}");
         }
 
         if (TryGetCachedAgent(backend, fingerprint, out var cachedAgent, out var cachedProtocol))
         {
             progress?.Report($"Using cached {backend} Agent ({ShortFingerprint(fingerprint)}). No rebuild needed.");
+            ViewerLog.Info($"Agent cache hit: {cachedAgent}");
             return new AgentBuildResult(
                 true,
                 $"Compatible {backend} Agent cache hit.",
@@ -188,9 +195,9 @@ internal static class AgentBuilder
         var dotnet = ResolveDotNet();
         if (dotnet is null)
         {
-            return new AgentBuildResult(
-                false,
-                ".NET SDK was not found and this Unity compatibility profile has not been built before. Install the .NET 8 SDK for the first build.");
+            const string message = ".NET SDK was not found and this Unity compatibility profile has not been built before. Install the .NET 8 SDK for the first build.";
+            ViewerLog.Error(message);
+            return new AgentBuildResult(false, message);
         }
 
         var workspace = Path.Combine(
@@ -211,6 +218,7 @@ internal static class AgentBuilder
         }
         catch (Exception ex)
         {
+            ViewerLog.Error("Could not prepare Agent Builder workspace.", ex);
             return new AgentBuildResult(false, $"Could not prepare Agent Builder workspace: {ex.Message}");
         }
 
@@ -234,35 +242,49 @@ internal static class AgentBuilder
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add(Configuration);
         startInfo.ArgumentList.Add("--nologo");
-        startInfo.ArgumentList.Add($"-p:UnityCoreReference={references!.CorePath}");
+        startInfo.ArgumentList.Add($"-p:UnityCoreReference={references.CorePath}");
         startInfo.ArgumentList.Add($"-p:UnitySceneReference={references.ScenePath}");
+
+        ViewerLog.Info($"Starting Agent build: {dotnet} build {projectPath} -c {Configuration}");
+        ViewerLog.Info($"Agent build workspace: {workspace}");
 
         try
         {
             using var process = Process.Start(startInfo);
             if (process is null)
             {
-                return new AgentBuildResult(false, "dotnet build could not be started.");
+                const string message = "dotnet build could not be started.";
+                ViewerLog.Error(message);
+                return new AgentBuildResult(false, message);
             }
 
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
+            var stdout = new StringBuilder();
+            var stderr = new StringBuilder();
+            var stdoutTask = PumpOutputAsync(process.StandardOutput, stdout, "dotnet", isError: false, cancellationToken);
+            var stderrTask = PumpOutputAsync(process.StandardError, stderr, "dotnet", isError: true, cancellationToken);
+
+            await Task.WhenAll(
+                process.WaitForExitAsync(cancellationToken),
+                stdoutTask,
+                stderrTask);
+
+            ViewerLog.Info($"dotnet build exited with code {process.ExitCode}.");
 
             if (process.ExitCode != 0)
             {
                 var detail = Tail(string.Join(Environment.NewLine, stdout, stderr), 24);
+                ViewerLog.Error($"{backend} Agent build failed with exit code {process.ExitCode}.{Environment.NewLine}{detail}");
                 return new AgentBuildResult(false, $"{backend} Agent build failed.{Environment.NewLine}{detail}");
             }
         }
         catch (OperationCanceledException)
         {
+            ViewerLog.Warning($"{backend} Agent build was cancelled or timed out.");
             throw;
         }
         catch (Exception ex)
         {
+            ViewerLog.Error($"{backend} Agent build failed to start or stream output.", ex);
             return new AgentBuildResult(false, $"{backend} Agent build failed to start: {ex.Message}");
         }
 
@@ -272,7 +294,9 @@ internal static class AgentBuilder
 
         if (!File.Exists(agentPath) || !File.Exists(protocolPath))
         {
-            return new AgentBuildResult(false, "Agent build completed but expected output DLLs were not found.");
+            const string message = "Agent build completed but expected output DLLs were not found.";
+            ViewerLog.Error(message);
+            return new AgentBuildResult(false, message);
         }
 
         try
@@ -293,6 +317,7 @@ internal static class AgentBuilder
                 $"builtUtc={DateTime.UtcNow:O}{Environment.NewLine}");
 
             progress?.Report($"Cached {backend} Agent profile {ShortFingerprint(fingerprint)} for future launches.");
+            ViewerLog.Info($"Cached Agent at: {cacheAgent}");
             return new AgentBuildResult(
                 true,
                 $"{backend} Agent built and cached successfully.",
@@ -302,11 +327,39 @@ internal static class AgentBuilder
         catch (Exception ex)
         {
             progress?.Report($"{backend} Agent built successfully, but cache write failed: {ex.Message}");
+            ViewerLog.Warning($"{backend} Agent built successfully, but cache write failed: {ex}");
             return new AgentBuildResult(
                 true,
                 $"{backend} Agent built successfully; cache could not be written.",
                 agentPath,
                 protocolPath);
+        }
+    }
+
+    private static async Task PumpOutputAsync(
+        StreamReader reader,
+        StringBuilder capture,
+        string source,
+        bool isError,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null)
+            {
+                return;
+            }
+
+            capture.AppendLine(line);
+            if (isError)
+            {
+                ViewerLog.Error($"[{source}] {line}");
+            }
+            else
+            {
+                ViewerLog.Info($"[{source}] {line}");
+            }
         }
     }
 
