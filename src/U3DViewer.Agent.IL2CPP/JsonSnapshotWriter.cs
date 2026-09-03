@@ -69,7 +69,31 @@ internal static class JsonSnapshotWriter
             String(sb, target.LayerNames[i]);
         }
         sb.Append("],");
+        NumberProperty(sb, "selectedCameraInstanceId", target.SelectedCameraInstanceId); sb.Append(',');
+        NumberProperty(sb, "sourceCameraInstanceId", target.SourceCameraInstanceId); sb.Append(',');
+        Property(sb, "sourceCameraName", target.SourceCameraName); sb.Append(',');
+        sb.Append("\"cameras\":[");
+        for (var i = 0; i < target.Cameras.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            WriteCamera(sb, target.Cameras[i]);
+        }
+        sb.Append("],");
         Property(sb, "status", status);
+        sb.Append('}');
+    }
+
+    private static void WriteCamera(StringBuilder sb, CameraInfo camera)
+    {
+        sb.Append('{');
+        NumberProperty(sb, "instanceId", camera.InstanceId); sb.Append(',');
+        Property(sb, "name", camera.Name); sb.Append(',');
+        FloatProperty(sb, "depth", camera.Depth); sb.Append(',');
+        BoolProperty(sb, "enabled", camera.Enabled); sb.Append(',');
+        BoolProperty(sb, "activeInHierarchy", camera.ActiveInHierarchy); sb.Append(',');
+        BoolProperty(sb, "hasTargetTexture", camera.HasTargetTexture); sb.Append(',');
+        NumberProperty(sb, "targetDisplay", camera.TargetDisplay); sb.Append(',');
+        BoolProperty(sb, "orthographic", camera.Orthographic);
         sb.Append('}');
     }
 
