@@ -159,6 +159,8 @@ Changing resolution recreates the Unity RenderTexture and D3D11 shared texture. 
 
 The Scene lens is also adjustable: FOV, near/far clipping planes and orthographic size are exposed in the Viewer, with Perspective/Orthographic switching independent of the game camera projection.
 
+Scene Camera culling is configurable independently of the game view. `All` renders all 32 Unity Layers, `Copy Main Camera` follows the current `Camera.main.cullingMask` at snapshot cadence, and `Manual` opens a 32-Layer checklist using the target game's Layer names. The current 32-bit mask is shown in hexadecimal. `Copy Main Camera` remains the default to preserve existing behavior.
+
 ## Performance metrics
 
 The Scene footer reports lightweight runtime metrics so optimization can be based on measurements rather than guesses:
@@ -184,6 +186,7 @@ The Scene render metric is CPU-side timing around `Camera.Render()` and the nati
 - Unity-style Scene fly camera controls
 - adjustable Perspective/Orthographic Scene lens
 - adjustable Scene FPS and render-target resolution
+- selectable Scene Camera culling mask: All / Copy Main Camera / Manual Layers
 - visible fly-camera speed
 - runtime performance metrics
 - D3D11 Scene View transport through a named shared texture
