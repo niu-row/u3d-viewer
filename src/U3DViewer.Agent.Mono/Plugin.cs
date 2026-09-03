@@ -100,7 +100,9 @@ public sealed class Plugin : BaseUnityPlugin
         }
 
         UpdateGameFps();
+#if !LEGACY_MONO
         var flushSceneTransport = false;
+#endif
 
         while (pipeServer.TryDequeueCommand(out var command))
         {
@@ -136,6 +138,7 @@ public sealed class Plugin : BaseUnityPlugin
                             _sceneCulling?.Reapply();
                         }
 
+#if !LEGACY_MONO
                         if (command.Kind == ViewerCommandKind.CameraReset ||
                             command.Kind == ViewerCommandKind.CameraRecover ||
                             command.Kind == ViewerCommandKind.CameraStreamSettings ||
@@ -143,6 +146,7 @@ public sealed class Plugin : BaseUnityPlugin
                         {
                             flushSceneTransport = true;
                         }
+#endif
 
                         if (command.Kind == ViewerCommandKind.CameraStreamSettings ||
                             command.Kind == ViewerCommandKind.CameraRecover)
@@ -160,6 +164,7 @@ public sealed class Plugin : BaseUnityPlugin
         }
 
         _sceneCamera?.TickRender();
+#if !LEGACY_MONO
         if (flushSceneTransport)
         {
             try
@@ -171,6 +176,7 @@ public sealed class Plugin : BaseUnityPlugin
                 LogSource.LogWarning($"Failed to flush Scene transport bootstrap commands: {ex.Message}");
             }
         }
+#endif
 
 #if !LEGACY_MONO
         PublishCompletedSerialization(pipeServer);
