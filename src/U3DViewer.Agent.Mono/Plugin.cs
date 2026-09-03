@@ -2,6 +2,7 @@ using System.Diagnostics;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
+using UnityEngine;
 
 namespace U3DViewer.Agent.Mono;
 
@@ -17,17 +18,23 @@ public sealed class Plugin : BaseUnityPlugin
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
+    private bool _originalRunInBackground;
+    private bool _runInBackgroundCaptured;
 
     private ManualLogSource LogSource => Logger;
 
     private void Awake()
     {
+        _originalRunInBackground = Application.runInBackground;
+        _runInBackgroundCaptured = true;
+        Application.runInBackground = true;
+
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
         _sceneCamera = new SceneCameraController();
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
         _selectedInstanceId = 0;
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
     }
 
     private void Update()
@@ -36,6 +43,13 @@ public sealed class Plugin : BaseUnityPlugin
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
             return;
+        }
+
+        // Some games change this setting after startup. Viewer mode requires the Unity
+        // player loop to keep running while its window is not focused.
+        if (!Application.runInBackground)
+        {
+            Application.runInBackground = true;
         }
 
         while (pipeServer.TryDequeueCommand(out var command))
@@ -59,12 +73,12 @@ public sealed class Plugin : BaseUnityPlugin
 
         _sceneCamera?.TickRender();
 
-        if (UnityEngine.Time.unscaledTime < _nextSnapshotAt)
+        if (Time.unscaledTime < _nextSnapshotAt)
         {
             return;
         }
 
-        _nextSnapshotAt = UnityEngine.Time.unscaledTime + 1.0f;
+        _nextSnapshotAt = Time.unscaledTime + 1.0f;
 
         try
         {
@@ -80,6 +94,12 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        if (_runInBackgroundCaptured)
+        {
+            Application.runInBackground = _originalRunInBackground;
+            _runInBackgroundCaptured = false;
+        }
+
         _sceneCamera?.Dispose();
         _sceneCamera = null;
         _pipeServer?.Dispose();
