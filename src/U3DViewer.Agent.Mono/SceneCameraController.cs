@@ -200,8 +200,8 @@ internal sealed class SceneCameraController : IDisposable
         _idleFps = Mathf.Clamp(SanitizeFinite(idleFps, DefaultIdleFps), MinStreamFps, MaxStreamFps);
         _interactiveFps = Mathf.Clamp(SanitizeFinite(interactiveFps, DefaultInteractiveFps), MinStreamFps, MaxStreamFps);
 
-        width = Math.Clamp(width, MinRenderDimension, MaxRenderDimension);
-        height = Math.Clamp(height, MinRenderDimension, MaxRenderDimension);
+        width = Mathf.Clamp(width, MinRenderDimension, MaxRenderDimension);
+        height = Mathf.Clamp(height, MinRenderDimension, MaxRenderDimension);
 
         if (width != _renderWidth || height != _renderHeight)
         {
@@ -229,7 +229,6 @@ internal sealed class SceneCameraController : IDisposable
         }
         catch
         {
-            // The bridge may not have initialized yet.
         }
 
         _camera.targetTexture = null;
@@ -521,7 +520,6 @@ internal sealed class SceneCameraController : IDisposable
         }
         catch
         {
-            // Bridge is optional until M4 deployment is complete.
         }
 
         if (_camera is not null)
