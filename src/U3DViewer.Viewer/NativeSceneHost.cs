@@ -65,6 +65,25 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     public void SetRenderTarget(RenderTargetInfo? target)
     {
+        if (target is not null &&
+            target.Available &&
+            target.NativeBridgeAbiVersion != NativeBridgeProtocol.AbiVersion)
+        {
+            lock (_presenterStateLock)
+            {
+                _target = null;
+                _targetKey = string.Empty;
+                _presenterEpoch++;
+            }
+
+            _resizeRecoveryTimer.Stop();
+            _presenterWake.Set();
+            SetStatus(
+                $"NativeBridge ABI mismatch: game={target.NativeBridgeAbiVersion}, viewer expects={NativeBridgeProtocol.AbiVersion}. " +
+                "Redeploy U3DViewer.NativeBridge.dll and restart the game.");
+            return;
+        }
+
         if (target is null || !target.Available || string.IsNullOrWhiteSpace(target.SharedName))
         {
             lock (_presenterStateLock)
@@ -346,10 +365,9 @@ internal sealed class NativeSceneHost : NativeControlHost
                     $"Could not open GPU Scene presenter at {stage} (HRESULT 0x{hresult:X8}, source DXGI {target.DxgiFormat}). " +
                     $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
 
-                // D3D resource/open failures can be transient when the Unity render thread has not
-                // completed the current shared-texture generation yet. Kick Camera.Reset at most
-                // once per second while the presenter remains unhealthy. This matches the manual
-                // recovery action without flooding the Agent command pipe.
+                // The game-side transport can transiently lose the current shared generation.
+                // Request a transport-only rebuild at most once per second; unlike Camera.Reset,
+                // this preserves Scene Camera transform, lens, projection and culling state.
                 if (initStage >= 4 && initStage <= 12)
                 {
                     RequestRecoveryWatchdog($"open failure at {stage}");
@@ -412,8 +430,8 @@ internal sealed class NativeSceneHost : NativeControlHost
         }
 
         _nextRecoveryWatchdogUtc = now + RecoveryWatchdogInterval;
-        ViewerLog.Warning($"Scene presenter watchdog requested Camera.Reset after {reason}.");
-        Dispatcher.UIThread.Post(() => _sendCommand(ViewerCommandCodec.EncodeCameraReset()));
+        ViewerLog.Warning($"Scene presenter watchdog requested transport recovery after {reason}.");
+        Dispatcher.UIThread.Post(() => _sendCommand(ViewerCommandCodec.EncodeCameraRecover()));
     }
 
     private static void ClosePresenterNative(IntPtr window)
