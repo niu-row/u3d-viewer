@@ -14,6 +14,7 @@ internal sealed class HierarchyPanel : Border
 {
     private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
     private readonly HashSet<int> _expandedInstanceIds = new();
+    private readonly HashSet<long> _expandedSceneKeys = new();
     private readonly TreeView _tree;
 
     private HierarchyNode? _selectedNode;
@@ -57,6 +58,7 @@ internal sealed class HierarchyPanel : Border
 
     public event Action<int, GameObjectInfo?>? SelectionChanged;
     public event Action<int, bool>? ExpansionChanged;
+    public event Action<int, string, bool>? SceneExpansionChanged;
 
     public int? SelectedInstanceId => _selectedNode?.InstanceId;
     public GameObjectInfo? SelectedGameObject => _selectedNode?.GameObject;
@@ -74,6 +76,7 @@ internal sealed class HierarchyPanel : Border
         {
             var scene = scenes[index];
             var key = $"scene:{scene.BuildIndex}:{scene.Name}";
+            var sceneKey = ViewerCommandCodec.BuildSceneKey(scene.BuildIndex, scene.Name);
             desiredKeys.Add(key);
 
             if (!existingScenes.TryGetValue(key, out var node))
@@ -94,13 +97,29 @@ internal sealed class HierarchyPanel : Border
             node.SceneName = scene.Name;
             node.SceneBuildIndex = scene.BuildIndex;
             UpdateLabel(node);
-            SyncGameObjects(node.Children, scene.Roots);
+
+            if (scene.Roots.Length > 0)
+            {
+                SyncGameObjects(node.Children, scene.Roots);
+            }
+            else if (scene.IsLoaded && !_expandedSceneKeys.Contains(sceneKey))
+            {
+                // Keep a tiny placeholder so the TreeView exposes an expansion affordance.
+                // The Agent will not call GetRootGameObjects until the user expands this Scene.
+                EnsurePlaceholder(node);
+            }
+            else
+            {
+                node.Children.Clear();
+            }
         }
 
         for (var index = _rootNodes.Count - 1; index >= 0; index--)
         {
             if (!desiredKeys.Contains(_rootNodes[index].Key))
             {
+                var removed = _rootNodes[index];
+                _expandedSceneKeys.Remove(ViewerCommandCodec.BuildSceneKey(removed.SceneBuildIndex, removed.SceneName));
                 _rootNodes.RemoveAt(index);
             }
         }
@@ -127,6 +146,7 @@ internal sealed class HierarchyPanel : Border
     public void ResetConnectionState()
     {
         _expandedInstanceIds.Clear();
+        _expandedSceneKeys.Clear();
     }
 
     public void Shutdown()
@@ -233,13 +253,22 @@ internal sealed class HierarchyPanel : Border
 
     private void OnExpanded(object? sender, RoutedEventArgs e)
     {
-        if (e.Source is not TreeViewItem item || item.DataContext is not HierarchyNode node ||
-            node.IsPlaceholder || node.InstanceId is not int instanceId)
+        if (e.Source is not TreeViewItem item || item.DataContext is not HierarchyNode node || node.IsPlaceholder)
         {
             return;
         }
 
-        if (_expandedInstanceIds.Add(instanceId))
+        if (node.GameObject is null)
+        {
+            var sceneKey = ViewerCommandCodec.BuildSceneKey(node.SceneBuildIndex, node.SceneName);
+            if (_expandedSceneKeys.Add(sceneKey))
+            {
+                SceneExpansionChanged?.Invoke(node.SceneBuildIndex, node.SceneName, true);
+            }
+            return;
+        }
+
+        if (node.InstanceId is int instanceId && _expandedInstanceIds.Add(instanceId))
         {
             ExpansionChanged?.Invoke(instanceId, true);
         }
@@ -257,7 +286,15 @@ internal sealed class HierarchyPanel : Border
 
     private void CollapseBranch(HierarchyNode node)
     {
-        if (node.InstanceId is int instanceId && _expandedInstanceIds.Remove(instanceId))
+        if (node.GameObject is null)
+        {
+            var sceneKey = ViewerCommandCodec.BuildSceneKey(node.SceneBuildIndex, node.SceneName);
+            if (_expandedSceneKeys.Remove(sceneKey))
+            {
+                SceneExpansionChanged?.Invoke(node.SceneBuildIndex, node.SceneName, false);
+            }
+        }
+        else if (node.InstanceId is int instanceId && _expandedInstanceIds.Remove(instanceId))
         {
             ExpansionChanged?.Invoke(instanceId, false);
         }
