@@ -17,6 +17,8 @@ public sealed class Plugin : BaseUnityPlugin
     private const float SnapshotRestartDelay = 1.0f;
     private const int HierarchyNodesPerFrame = 64;
     private const double HierarchyScanBudgetMilliseconds = 0.75;
+    private const int InteractiveHierarchyNodesPerFrame = 256;
+    private const double InteractiveHierarchyScanBudgetMilliseconds = 2.0;
 
     private readonly HashSet<int> _expandedInstanceIds = new();
     private PipeServer? _pipeServer;
@@ -26,6 +28,7 @@ public sealed class Plugin : BaseUnityPlugin
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
+    private bool _interactiveHierarchyRefresh;
     private bool _originalRunInBackground;
     private bool _runInBackgroundCaptured;
 
@@ -46,6 +49,7 @@ public sealed class Plugin : BaseUnityPlugin
         _expandedInstanceIds.Clear();
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
+        _interactiveHierarchyRefresh = false;
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
     }
 
@@ -57,6 +61,7 @@ public sealed class Plugin : BaseUnityPlugin
             ResetSnapshotState();
             _expandedInstanceIds.Clear();
             _nextSnapshotAt = 0f;
+            _interactiveHierarchyRefresh = false;
             return;
         }
 
@@ -73,6 +78,7 @@ public sealed class Plugin : BaseUnityPlugin
                 {
                     case ViewerCommandKind.SelectObject:
                         _selectedInstanceId = command.InstanceId;
+                        _interactiveHierarchyRefresh = true;
                         RestartHierarchyScan();
                         continue;
                     case ViewerCommandKind.HierarchyExpanded:
@@ -84,6 +90,7 @@ public sealed class Plugin : BaseUnityPlugin
                         {
                             _expandedInstanceIds.Remove(command.InstanceId);
                         }
+                        _interactiveHierarchyRefresh = true;
                         RestartHierarchyScan();
                         continue;
                     default:
@@ -123,6 +130,7 @@ public sealed class Plugin : BaseUnityPlugin
             catch (Exception ex)
             {
                 _nextSnapshotAt = now + SnapshotRestartDelay;
+                _interactiveHierarchyRefresh = false;
                 LogSource.LogError($"Failed to start scene scan: {ex}");
                 return;
             }
@@ -130,7 +138,14 @@ public sealed class Plugin : BaseUnityPlugin
 
         try
         {
-            _sceneScan.ProcessSlice(HierarchyNodesPerFrame, HierarchyScanBudgetMilliseconds);
+            var maxNodes = _interactiveHierarchyRefresh
+                ? InteractiveHierarchyNodesPerFrame
+                : HierarchyNodesPerFrame;
+            var budgetMilliseconds = _interactiveHierarchyRefresh
+                ? InteractiveHierarchyScanBudgetMilliseconds
+                : HierarchyScanBudgetMilliseconds;
+
+            _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
             if (!_sceneScan.IsComplete)
             {
                 return;
@@ -140,6 +155,7 @@ public sealed class Plugin : BaseUnityPlugin
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            _interactiveHierarchyRefresh = false;
 
             _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
         }
@@ -147,6 +163,7 @@ public sealed class Plugin : BaseUnityPlugin
         {
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            _interactiveHierarchyRefresh = false;
             LogSource.LogError($"Failed to advance scene scan: {ex}");
         }
     }
@@ -195,6 +212,7 @@ public sealed class Plugin : BaseUnityPlugin
 
         ResetSnapshotState();
         _expandedInstanceIds.Clear();
+        _interactiveHierarchyRefresh = false;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
         _pipeServer?.Dispose();
