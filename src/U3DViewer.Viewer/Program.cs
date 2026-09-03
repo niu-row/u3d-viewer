@@ -1,5 +1,4 @@
 using Avalonia;
-using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Themes.Fluent;
 
@@ -13,7 +12,7 @@ internal static class Program
         var lifetime = new ClassicDesktopStyleApplicationLifetime
         {
             Args = args,
-            ShutdownMode = ShutdownMode.OnMainWindowClose
+            ShutdownMode = ShutdownMode.OnLastWindowClose
         };
 
         AppBuilder.Configure<Application>()
@@ -21,7 +20,22 @@ internal static class Program
             .AfterSetup(builder => builder.Instance?.Styles.Add(new FluentTheme()))
             .SetupWithLifetime(lifetime);
 
-        lifetime.MainWindow = new MainWindow();
+        ProcessPickerWindow? picker = null;
+        picker = new ProcessPickerWindow(target =>
+        {
+            ViewerSession.Target = target;
+
+            var mainWindow = new MainWindow
+            {
+                Title = $"U3D Viewer — {target.ProcessName} ({target.ProcessId})"
+            };
+
+            lifetime.MainWindow = mainWindow;
+            mainWindow.Show();
+            picker?.Close();
+        });
+
+        lifetime.MainWindow = picker;
         return lifetime.Start(args);
     }
 }

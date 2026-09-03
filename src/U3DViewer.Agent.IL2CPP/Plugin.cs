@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
 
@@ -14,13 +15,14 @@ public sealed class Plugin : BasePlugin
 
     public override void Load()
     {
-        _pipeServer = new PipeServer("u3d-viewer", Log);
+        var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
+        _pipeServer = new PipeServer(pipeName, Log);
         _pipeServer.Start();
 
         RuntimeBehaviour.Initialize(_pipeServer, Log);
         AddComponent<RuntimeBehaviour>();
 
-        Log.LogInfo("U3D Viewer IL2CPP agent loaded.");
+        Log.LogInfo($"U3D Viewer IL2CPP agent loaded. Pipe: {pipeName}");
     }
 
     public override bool Unload()

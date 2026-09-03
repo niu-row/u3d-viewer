@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
@@ -20,10 +21,11 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Awake()
     {
+        var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
         _sceneCamera = new SceneCameraController();
-        _pipeServer = new PipeServer("u3d-viewer", LogSource);
+        _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
-        LogSource.LogInfo("U3D Viewer Mono agent loaded.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}");
     }
 
     private void Update()

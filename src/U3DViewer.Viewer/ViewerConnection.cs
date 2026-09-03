@@ -20,10 +20,17 @@ internal sealed class ViewerConnection : IAsyncDisposable
         PropertyNameCaseInsensitive = true
     };
     private readonly object _writerGate = new();
+    private readonly string _pipeName;
 
     private Task? _runTask;
     private ConnectionState _state = ConnectionState.Disconnected;
     private StreamWriter? _writer;
+
+    public ViewerConnection()
+    {
+        _pipeName = ViewerSession.Target?.PipeName
+            ?? throw new InvalidOperationException("No Unity process was selected before creating ViewerConnection.");
+    }
 
     public event Action<ConnectionState>? StateChanged;
     public event Action<SceneSnapshot>? SnapshotReceived;
@@ -71,7 +78,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
             {
                 await using var pipe = new NamedPipeClientStream(
                     ".",
-                    "u3d-viewer",
+                    _pipeName,
                     PipeDirection.InOut,
                     PipeOptions.Asynchronous);
 
@@ -114,7 +121,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
             }
             catch (TimeoutException)
             {
-                // Agent is not running yet; retry quietly.
+                // Selected target is still running but its Agent may be restarting; retry quietly.
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
