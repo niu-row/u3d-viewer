@@ -47,7 +47,6 @@ internal static class Program
                 {
                     Title = $"U3D Viewer — {target.ProcessName} ({target.ProcessId})"
                 };
-                SceneCullingUi.Attach(mainWindow);
                 Localization.Attach(mainWindow);
 
                 try
