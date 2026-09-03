@@ -53,6 +53,15 @@ internal static class JsonSnapshotWriter
         FloatProperty(sb, "moveSpeed", target.MoveSpeed); sb.Append(',');
         FloatProperty(sb, "idleFps", target.IdleFps); sb.Append(',');
         FloatProperty(sb, "interactiveFps", target.InteractiveFps); sb.Append(',');
+        NumberProperty(sb, "cullingMode", (int)target.CullingMode); sb.Append(',');
+        NumberProperty(sb, "cullingMask", target.CullingMask); sb.Append(',');
+        sb.Append("\"layerNames\":[");
+        for (var i = 0; i < target.LayerNames.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            String(sb, target.LayerNames[i]);
+        }
+        sb.Append("],");
         Property(sb, "status", target.Status);
         sb.Append('}');
     }
