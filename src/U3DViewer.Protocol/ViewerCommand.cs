@@ -9,7 +9,8 @@ public enum ViewerCommandKind
     CameraSpeed,
     CameraProjection,
     CameraReset,
-    CameraFocus
+    CameraFocus,
+    SelectObject
 }
 
 public readonly struct ViewerCommand
@@ -52,6 +53,9 @@ public static class ViewerCommandCodec
 
     public static string EncodeCameraFocus(int instanceId) =>
         string.Join("\t", "camera.focus", instanceId.ToString(CultureInfo.InvariantCulture));
+
+    public static string EncodeSelectObject(int instanceId) =>
+        string.Join("\t", "selection.set", instanceId.ToString(CultureInfo.InvariantCulture));
 
     public static bool TryParse(string line, out ViewerCommand command)
     {
@@ -102,6 +106,11 @@ public static class ViewerCommandCodec
             case "camera.focus" when parts.Length == 2 &&
                 int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var instanceId):
                 command = new ViewerCommand(ViewerCommandKind.CameraFocus, instanceId: instanceId);
+                return true;
+
+            case "selection.set" when parts.Length == 2 &&
+                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var selectedInstanceId):
+                command = new ViewerCommand(ViewerCommandKind.SelectObject, instanceId: selectedInstanceId);
                 return true;
 
             default:
