@@ -14,11 +14,29 @@ internal static class BepInExBootstrap
     private static readonly TimeSpan InteropTimeout = TimeSpan.FromMinutes(2);
     private static readonly HttpClient Http = CreateHttpClient();
 
-    public static bool IsInstalled(string executablePath)
+    public static bool IsInstalled(string executablePath, string? backend = null)
     {
         var gameDirectory = Path.GetDirectoryName(executablePath);
-        return !string.IsNullOrWhiteSpace(gameDirectory) &&
-               File.Exists(Path.Combine(gameDirectory, "BepInEx", "core", "BepInEx.Core.dll"));
+        if (string.IsNullOrWhiteSpace(gameDirectory))
+        {
+            return false;
+        }
+
+        var coreDirectory = Path.Combine(gameDirectory, "BepInEx", "core");
+        if (!File.Exists(Path.Combine(coreDirectory, "BepInEx.Core.dll")) ||
+            !File.Exists(Path.Combine(gameDirectory, "doorstop_config.ini")) ||
+            (!File.Exists(Path.Combine(gameDirectory, "winhttp.dll")) &&
+             !File.Exists(Path.Combine(gameDirectory, "version.dll"))))
+        {
+            return false;
+        }
+
+        return backend switch
+        {
+            "Mono" => File.Exists(Path.Combine(coreDirectory, "BepInEx.Unity.Mono.Preloader.dll")),
+            "IL2CPP" => File.Exists(Path.Combine(coreDirectory, "BepInEx.Unity.IL2CPP.dll")),
+            _ => true
+        };
     }
 
     public static async Task<BepInExBootstrapResult> EnsureInstalledAsync(
@@ -27,7 +45,7 @@ internal static class BepInExBootstrap
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        if (IsInstalled(executablePath))
+        if (IsInstalled(executablePath, backend))
         {
             return ApplyLowOverheadProfile(executablePath, "BepInEx is already installed.", progress);
         }
@@ -64,15 +82,17 @@ internal static class BepInExBootstrap
                 await input.CopyToAsync(output, cancellationToken);
             }
 
-            progress?.Report("Installing BepInEx into the selected game...");
+            progress?.Report("Installing or repairing BepInEx in the selected game...");
             ZipFile.ExtractToDirectory(archivePath, gameDirectory, overwriteFiles: true);
 
-            if (!IsInstalled(executablePath))
+            if (!IsInstalled(executablePath, backend))
             {
-                return new BepInExBootstrapResult(false, "BepInEx archive was extracted, but BepInEx.Core.dll was not found afterwards.");
+                return new BepInExBootstrapResult(
+                    false,
+                    "BepInEx archive was extracted, but the Doorstop loader or backend preloader files are still incomplete.");
             }
 
-            return ApplyLowOverheadProfile(executablePath, "BepInEx installed.", progress);
+            return ApplyLowOverheadProfile(executablePath, "BepInEx installed/repaired.", progress);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -89,6 +109,52 @@ internal static class BepInExBootstrap
         catch (Exception ex)
         {
             return new BepInExBootstrapResult(false, $"BepInEx installation failed: {ex.Message}");
+        }
+    }
+
+    public static bool TryEnableLegacyMonoDoorstopProxy(string executablePath, out string message)
+    {
+        message = string.Empty;
+        var gameDirectory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(gameDirectory))
+        {
+            message = "Game directory could not be resolved while switching the Doorstop proxy.";
+            return false;
+        }
+
+        var winHttpPath = Path.Combine(gameDirectory, "winhttp.dll");
+        var versionPath = Path.Combine(gameDirectory, "version.dll");
+
+        try
+        {
+            if (File.Exists(versionPath) && !File.Exists(winHttpPath))
+            {
+                message = "Legacy Doorstop version.dll proxy is already enabled.";
+                return true;
+            }
+
+            if (File.Exists(versionPath))
+            {
+                message =
+                    $"Cannot automatically switch BepInEx to the legacy version.dll proxy because the game already has its own file: {versionPath}";
+                return false;
+            }
+
+            if (!File.Exists(winHttpPath))
+            {
+                message = $"BepInEx Doorstop proxy was not found: {winHttpPath}";
+                return false;
+            }
+
+            File.Move(winHttpPath, versionPath);
+            message =
+                "Switched BepInEx Doorstop from winhttp.dll to version.dll for legacy Unity compatibility.";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            message = $"Could not switch BepInEx to the legacy version.dll proxy: {ex.Message}";
+            return false;
         }
     }
 
@@ -155,7 +221,7 @@ internal static class BepInExBootstrap
                     return new BepInExBootstrapResult(
                         false,
                         $"Game exited before IL2CPP interop generation completed (exit code {process.ExitCode}). " +
-                        $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log.");
+                        $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log or LogOutput.txt.");
                 }
 
                 await Task.Delay(500, cancellationToken);
@@ -165,7 +231,7 @@ internal static class BepInExBootstrap
             return new BepInExBootstrapResult(
                 false,
                 "BepInEx did not finish IL2CPP interop generation within 2 minutes. " +
-                $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log.");
+                $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log or LogOutput.txt.");
         }
     }
 
