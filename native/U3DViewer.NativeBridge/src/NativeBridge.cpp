@@ -269,15 +269,12 @@ U3DVIEWER_EXPORT int U3DViewer_SetSourceTexture(void* nativeTexture, const wchar
     g_sharedName = sharedName;
     ResetWriterResourceLocked(true);
 
-    // Publish the named shared resource before the Agent reports SharedName to the Viewer.
-    // Previously the resource was created lazily by the first render event, which left a
-    // window where OpenSharedResourceByName could see the new name before any NT handle
-    // existed. Resizing the Scene view made that race easy to hit.
-    hr = EnsureSharedResourceLocked();
+    hr = RefreshSourceAdapterInfoLocked();
     if (FAILED(hr))
     {
-        g_lastError = hr;
-        return 0;
+        // Adapter metadata is diagnostic. Keep the source texture usable even if it cannot be queried.
+        g_sourceAdapterLuid = {};
+        g_sourceAdapterName.clear();
     }
 
     g_lastError = S_OK;
