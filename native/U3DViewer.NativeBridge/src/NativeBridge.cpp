@@ -20,7 +20,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-    constexpr int kNativeBridgeAbiVersion = 2;
+    constexpr int kNativeBridgeAbiVersion = 3;
     constexpr int kCopySceneTextureEvent = 1;
 
     std::mutex g_mutex;
@@ -306,10 +306,21 @@ U3DVIEWER_EXPORT int U3DViewer_GetCopyEventId()
     return kCopySceneTextureEvent;
 }
 
-U3DVIEWER_EXPORT int U3DViewer_IsSceneWriterReady()
+U3DVIEWER_EXPORT int U3DViewer_IsSceneWriterReady(const wchar_t* sharedName)
 {
+    if (sharedName == nullptr || sharedName[0] == L'\0')
+    {
+        return 0;
+    }
+
     std::lock_guard<std::mutex> lock(g_mutex);
-    return g_writerReady && g_sharedTexture && g_sharedHandle != nullptr && g_sharedMutex ? 1 : 0;
+    return g_writerReady &&
+           g_sharedTexture &&
+           g_sharedHandle != nullptr &&
+           g_sharedMutex &&
+           g_sharedName == sharedName
+        ? 1
+        : 0;
 }
 
 U3DVIEWER_EXPORT int U3DViewer_GetSourceDxgiFormat()
