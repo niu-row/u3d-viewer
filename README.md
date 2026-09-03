@@ -29,11 +29,13 @@ stage target Unity references when needed
   -> deploy NativeBridge next to the game executable and Viewer
 ```
 
+When the Viewer is built after an Agent, that Agent DLL is also bundled under `payload/Mono` or `payload/IL2CPP`. This lets the Viewer perform GUI-side installation without invoking `deploy.ps1`.
+
 `u3dviewer.local.json` and local build output are ignored by Git. For IL2CPP, run the target game with BepInEx once before the first build so `BepInEx/interop` exists.
 
 Other VSCode tasks include build-only, deploy-only, and `U3DViewer: Build + Deploy + Run Viewer`.
 
-## Process selection
+## GUI launch / attach automation
 
 `U3DViewer.Viewer.exe` starts with a Unity process picker instead of connecting to one global pipe.
 
@@ -45,7 +47,34 @@ Each Agent owns a process-specific pipe:
 u3d-viewer-<PID>
 ```
 
-This allows multiple Unity games to run at the same time without their Viewer connections colliding. Processes without the Agent are still listed as `Not detected`; an Agent already occupied by another Viewer is shown as `Busy`.
+The picker supports three normal workflows:
+
+```text
+Agent Ready
+  -> Attach
+
+Unity process + Agent Not detected
+  -> Install + Restart
+  -> copy bundled Agent + Protocol + NativeBridge
+  -> request a graceful game close
+  -> relaunch the game
+  -> wait for u3d-viewer-<new PID>
+  -> open Viewer automatically
+
+Open Game...
+  -> choose a Unity .exe
+  -> detect Mono / IL2CPP
+  -> deploy the bundled Agent
+  -> launch the game
+  -> wait for Agent Ready
+  -> open Viewer automatically
+```
+
+`Install + Restart` does not force-kill the game. If the process refuses a graceful close, U3DViewer leaves it running and asks the user to close it manually. The GUI automation also does not perform generic remote DLL injection into an arbitrary live process.
+
+A matching BepInEx 6 runtime must already be installed in the target game. If BepInEx is absent, the picker reports that GUI installation is unavailable rather than silently installing a runtime build that may not match the game.
+
+This allows multiple Unity games to run at the same time without their Viewer connections colliding. An Agent already occupied by another Viewer is shown as `Busy`.
 
 ## Current milestone
 
@@ -54,6 +83,8 @@ M2 desktop UI and M3 Scene Camera control are implemented. M4 now has an initial
 Implemented:
 
 - startup Unity process picker with PID/backend/Agent status
+- GUI `Attach`, `Install + Restart`, and `Open Game...` workflows
+- Agent payload bundled into the Viewer output for GUI deployment
 - per-process Named Pipe connection (`u3d-viewer-<PID>`)
 - automatic connection/reconnection to the selected Mono or IL2CPP agent
 - live Runtime Hierarchy tree
