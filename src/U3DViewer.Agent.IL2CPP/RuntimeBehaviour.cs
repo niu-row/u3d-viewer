@@ -5,9 +5,15 @@ namespace U3DViewer.Agent.IL2CPP;
 
 public sealed class RuntimeBehaviour : MonoBehaviour
 {
+    private const float SnapshotRestartDelay = 1.0f;
+    private const int HierarchyNodesPerFrame = 64;
+    private const double HierarchyScanBudgetMilliseconds = 0.75;
+
     private static PipeServer? _pipeServer;
     private static ManualLogSource? _log;
     private static SceneCameraController? _sceneCamera;
+    private static SceneScanner.SceneScanSession? _sceneScan;
+    private static Task<string>? _snapshotSerialization;
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
@@ -27,6 +33,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _pipeServer = pipeServer;
         _log = log;
         _sceneCamera = new SceneCameraController();
+        _sceneScan = null;
+        _snapshotSerialization = null;
         _nextSnapshotAt = 0f;
         _sequence = 0;
         _selectedInstanceId = 0;
@@ -36,6 +44,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     internal static void Shutdown()
     {
         RestoreBackgroundExecution();
+        _sceneScan = null;
+        _snapshotSerialization = null;
         _pipeServer = null;
         _log = null;
     }
@@ -45,6 +55,9 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
+            _sceneScan = null;
+            _snapshotSerialization = null;
+            _nextSnapshotAt = 0f;
             return;
         }
 
@@ -62,6 +75,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                 if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
                 {
                     _selectedInstanceId = command.InstanceId;
+                    _sceneScan = null;
+                    _snapshotSerialization = null;
                     _nextSnapshotAt = 0f;
                     continue;
                 }
@@ -75,31 +90,86 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         }
 
         _sceneCamera?.TickRender();
+        PublishCompletedSerialization(pipeServer);
 
-        if (Time.unscaledTime < _nextSnapshotAt)
+        if (_snapshotSerialization is not null)
         {
             return;
         }
 
-        _nextSnapshotAt = Time.unscaledTime + 1.0f;
+        var now = Time.unscaledTime;
+        if (_sceneScan is null)
+        {
+            if (now < _nextSnapshotAt)
+            {
+                return;
+            }
+
+            try
+            {
+                _sceneScan = SceneScanner.Begin(++_sequence, _selectedInstanceId);
+            }
+            catch (Exception ex)
+            {
+                _nextSnapshotAt = now + SnapshotRestartDelay;
+                _log?.LogError($"Failed to start IL2CPP scene scan: {ex}");
+                return;
+            }
+        }
 
         try
         {
-            var snapshot = SceneScanner.Capture(++_sequence, _selectedInstanceId);
+            _sceneScan.ProcessSlice(HierarchyNodesPerFrame, HierarchyScanBudgetMilliseconds);
+            if (!_sceneScan.IsComplete)
+            {
+                return;
+            }
+
+            var snapshot = _sceneScan.Snapshot;
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
-            pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
+            _sceneScan = null;
+            _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+
+            // Snapshot data contains no live Unity objects after the incremental scan completes,
+            // so JSON construction can safely run away from the Unity main thread.
+            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)
         {
-            _log?.LogError($"Failed to capture IL2CPP scene snapshot: {ex}");
+            _sceneScan = null;
+            _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            _log?.LogError($"Failed to advance IL2CPP scene scan: {ex}");
         }
     }
 
     public void OnDestroy()
     {
         RestoreBackgroundExecution();
+        _sceneScan = null;
+        _snapshotSerialization = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
+    }
+
+    private static void PublishCompletedSerialization(PipeServer pipeServer)
+    {
+        var task = _snapshotSerialization;
+        if (task is null || !task.IsCompleted)
+        {
+            return;
+        }
+
+        _snapshotSerialization = null;
+        if (task.Status == TaskStatus.RanToCompletion)
+        {
+            pipeServer.Publish(task.Result);
+            return;
+        }
+
+        if (task.IsFaulted)
+        {
+            _log?.LogError($"Failed to serialize IL2CPP scene snapshot: {task.Exception?.GetBaseException().Message}");
+        }
     }
 
     private static void RestoreBackgroundExecution()
