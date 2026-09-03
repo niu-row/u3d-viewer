@@ -9,6 +9,7 @@ public enum ViewerCommandKind
     CameraSpeed,
     CameraProjection,
     CameraLens,
+    CameraStreamSettings,
     CameraReset,
     CameraFocus,
     SelectObject,
@@ -53,6 +54,15 @@ public static class ViewerCommandCodec
 
     public static string EncodeCameraLens(float fieldOfView, float nearClip, float farClip, float orthographicSize) =>
         string.Join("\t", "camera.lens", F(fieldOfView), F(nearClip), F(farClip), F(orthographicSize));
+
+    public static string EncodeCameraStreamSettings(float idleFps, float interactiveFps, int width, int height) =>
+        string.Join(
+            "\t",
+            "camera.stream",
+            F(idleFps),
+            F(interactiveFps),
+            width.ToString(CultureInfo.InvariantCulture),
+            height.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -122,6 +132,19 @@ public static class ViewerCommandCodec
                     nearClip,
                     farClip,
                     orthographicSize);
+                return true;
+
+            case "camera.stream" when parts.Length == 5 &&
+                TryF(parts[1], out var idleFps) &&
+                TryF(parts[2], out var interactiveFps) &&
+                int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) &&
+                int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height):
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraStreamSettings,
+                    idleFps,
+                    interactiveFps,
+                    width,
+                    height);
                 return true;
 
             case "camera.reset" when parts.Length == 1:
