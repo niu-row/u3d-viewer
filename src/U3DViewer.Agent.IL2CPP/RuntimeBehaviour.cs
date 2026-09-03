@@ -35,7 +35,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     public void Update()
     {
         var pipeServer = _pipeServer;
-        if (pipeServer is null)
+        if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
             return;
         }
