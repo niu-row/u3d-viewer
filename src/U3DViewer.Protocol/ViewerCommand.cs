@@ -11,7 +11,8 @@ public enum ViewerCommandKind
     CameraLens,
     CameraReset,
     CameraFocus,
-    SelectObject
+    SelectObject,
+    HierarchyExpanded
 }
 
 public readonly struct ViewerCommand
@@ -60,6 +61,13 @@ public static class ViewerCommandCodec
 
     public static string EncodeSelectObject(int instanceId) =>
         string.Join("\t", "selection.set", instanceId.ToString(CultureInfo.InvariantCulture));
+
+    public static string EncodeHierarchyExpanded(int instanceId, bool expanded) =>
+        string.Join(
+            "\t",
+            "hierarchy.expanded",
+            instanceId.ToString(CultureInfo.InvariantCulture),
+            expanded ? "1" : "0");
 
     public static bool TryParse(string line, out ViewerCommand command)
     {
@@ -128,6 +136,15 @@ public static class ViewerCommandCodec
             case "selection.set" when parts.Length == 2 &&
                 int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var selectedInstanceId):
                 command = new ViewerCommand(ViewerCommandKind.SelectObject, instanceId: selectedInstanceId);
+                return true;
+
+            case "hierarchy.expanded" when parts.Length == 3 &&
+                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var expandedInstanceId) &&
+                (parts[2] == "0" || parts[2] == "1"):
+                command = new ViewerCommand(
+                    ViewerCommandKind.HierarchyExpanded,
+                    instanceId: expandedInstanceId,
+                    flag: parts[2] == "1");
                 return true;
 
             default:
