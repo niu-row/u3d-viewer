@@ -40,6 +40,7 @@ public sealed class GameObjectInfo
     public string Name { get; set; } = string.Empty;
     public bool ActiveSelf { get; set; }
     public bool ActiveInHierarchy { get; set; }
+    public int ChildCount { get; set; }
     public int Layer { get; set; }
     public string Tag { get; set; } = string.Empty;
     public TransformInfo Transform { get; set; } = new();
