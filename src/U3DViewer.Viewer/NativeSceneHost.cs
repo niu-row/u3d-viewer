@@ -256,18 +256,9 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     private void SetLiveStatus(RenderTargetInfo target)
     {
-        var presenterLuid = U3DViewer_GetScenePresenterAdapterLuid(_hostWindow);
-        var presenterName = GetPresenterAdapterName();
-        var gameGpu = FormatAdapter(target.AdapterName, target.AdapterLuid);
-        var viewerGpu = FormatAdapter(presenterName, presenterLuid);
-        var agentStatus = string.IsNullOrWhiteSpace(target.Status)
-            ? string.Empty
-            : "\n" + target.Status.Trim();
-
         SetStatus(
-            $"LIVE GPU · {target.Width}×{target.Height} · DXGI {target.DxgiFormat} · " +
-            "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus\n" +
-            $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}" + agentStatus);
+            $"LIVE · {target.Width}×{target.Height} · DXGI {target.DxgiFormat} · " +
+            "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus");
     }
 
     private void PollInput(float deltaSeconds)
