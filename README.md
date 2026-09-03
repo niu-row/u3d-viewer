@@ -36,7 +36,7 @@ A running game selected through `Prepare + Restart` is only asked to close norma
 
 The development Viewer is built as a console application in addition to the Avalonia GUI. Keep the console window open while preparing or attaching to a game.
 
-Runtime preparation messages, resolved Unity reference paths, compatibility fingerprints, Agent cache hits, and the live `dotnet build` stdout/stderr stream are written to the console.
+Runtime preparation messages, resolved Unity reference paths, compatibility fingerprints, Agent cache hits, Agent build stdout/stderr, Scene GPU adapter identity, and native Scene presentation failures are written to the console.
 
 The same diagnostic stream is persisted under:
 
@@ -103,7 +103,7 @@ Unity Game.exe
 └─ U3DViewer.NativeBridge.dll
         │
         ├─ Named Pipe: u3d-viewer-<PID>
-        └─ D3D11 named shared Texture2D
+        └─ D3D11 named shared Texture2D + keyed mutex
                 ▼
 U3DViewer.Viewer.exe
 ├─ process picker
@@ -112,7 +112,29 @@ U3DViewer.Viewer.exe
 ├─ Runtime Hierarchy
 ├─ Runtime Inspector
 └─ Scene View
+   └─ Avalonia NativeControlHost
+      └─ Win32 child HWND
+         └─ D3D11 swap chain
+            └─ samples the named shared texture directly on the game GPU adapter
 ```
+
+The active Scene presentation path does not perform GPU-to-CPU staging readback. The Viewer opens the named shared texture on the same DXGI adapter LUID, samples it in a small D3D11 shader, performs the Unity RenderTexture Y flip on the GPU, and presents directly into the embedded HWND swap chain.
+
+## Scene View controls
+
+The Scene host uses native Win32 input so camera navigation does not depend on keyboard auto-repeat or Avalonia pointer boundaries.
+
+```text
+RMB + mouse     free look (Raw Input)
+RMB + W/S       forward / backward
+RMB + A/D       left / right
+RMB + Q/E       down / up
+Shift           temporary movement boost
+Mouse wheel     adjust fly speed
+F               focus selected GameObject
+```
+
+The Scene Camera renders at about 30 FPS while idle and temporarily boosts toward 60 FPS while move/look commands are active. This keeps navigation responsive without continuously doubling the extra Camera.Render workload.
 
 ## Current capabilities
 
@@ -125,9 +147,11 @@ U3DViewer.Viewer.exe
 - compatibility-keyed Agent reuse/cache
 - live Runtime Hierarchy
 - read-only Runtime Inspector
-- Scene Camera controls
+- Unity-style Scene fly camera controls
 - D3D11 Scene View transport through a named shared texture
-- first Viewer presentation path through staging readback into Avalonia
+- game/Viewer DXGI adapter LUID diagnostics
+- GPU-native Viewer Scene presentation with no CPU readback
+- GPU-side Y flip and aspect-preserving presentation
 
 ## Current limitations
 
@@ -135,7 +159,8 @@ U3DViewer.Viewer.exe
 - Scene transport currently requires Direct3D 11
 - a new, uncached compatibility profile currently requires a local .NET SDK for Agent compilation
 - unusual/custom Unity launchers can require additional process discovery handling
-- Scene View is fixed at 1280x720 and currently uses GPU-to-CPU staging readback
+- Scene Camera source render target is currently fixed at 1280x720
+- the game still performs an extra Scene Camera render for the inspector view; interactive rendering boosts toward 60 FPS and idle rendering falls back to about 30 FPS
 - picking, collider visualization and transform gizmos are not implemented yet
 - no GitHub Actions; validation is local/manual
 
