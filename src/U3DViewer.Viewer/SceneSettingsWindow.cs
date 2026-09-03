@@ -45,7 +45,7 @@ internal sealed class SceneSettingsWindow : Window
         _layerNames = target.LayerNames ?? Array.Empty<string>();
         _manualMask = target.CullingMask;
 
-        Title = Localization.T("settings.sceneTitle");
+        Title = L("Scene Settings", "场景设置");
         Width = 520;
         Height = 610;
         MinWidth = 460;
@@ -63,20 +63,20 @@ internal sealed class SceneSettingsWindow : Window
 
         _autoViewportBox = new CheckBox
         {
-            Content = Localization.T("settings.autoViewport"),
+            Content = L("Match Scene View size automatically", "自动匹配场景视图尺寸"),
             IsChecked = autoViewport,
             Margin = new Thickness(0, 4, 0, 2)
         };
         _autoViewportBox.IsCheckedChanged += (_, _) => UpdateResolutionEnabled();
 
+        var cullingOptions = BuildCullingOptions();
         _cullingSelector = new ComboBox
         {
-            ItemsSource = BuildCullingOptions(),
+            ItemsSource = cullingOptions,
             MinWidth = 190,
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            SelectedItem = cullingOptions.First(item => item.Mode == target.CullingMode)
         };
-        _cullingSelector.SelectedItem = ((CullingModeOption[])_cullingSelector.ItemsSource!)
-            .First(item => item.Mode == target.CullingMode);
 
         _layersButton = new Button
         {
@@ -88,8 +88,7 @@ internal sealed class SceneSettingsWindow : Window
         _maskStatus = new TextBlock
         {
             Text = FormatMask(_manualMask),
-            VerticalAlignment = VerticalAlignment.Center,
-            FontFamily = FontFamily.Default
+            VerticalAlignment = VerticalAlignment.Center
         };
 
         Content = BuildContent();
@@ -105,7 +104,7 @@ internal sealed class SceneSettingsWindow : Window
         };
 
         content.Children.Add(BuildSection(
-            Localization.T("settings.camera"),
+            L("Camera", "相机"),
             new[]
             {
                 ("FOV", (Control)_fovBox),
@@ -123,7 +122,9 @@ internal sealed class SceneSettingsWindow : Window
         renderBody.Children.Add(_autoViewportBox);
         renderBody.Children.Add(new TextBlock
         {
-            Text = Localization.T("settings.autoViewportHint"),
+            Text = L(
+                "When enabled, the RenderTexture follows the actual Scene View width, height, and aspect ratio after resizing stops.",
+                "开启后，RenderTexture 会在拖动停止后自动跟随场景视图的实际宽高和比例。"),
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.72,
             FontSize = 12
@@ -133,7 +134,7 @@ internal sealed class SceneSettingsWindow : Window
             (Localization.T("main.width"), (Control)_widthBox),
             (Localization.T("main.height"), (Control)_heightBox)
         }));
-        content.Children.Add(BuildSection(Localization.T("settings.render"), renderBody));
+        content.Children.Add(BuildSection(L("Rendering", "渲染"), renderBody));
 
         var visibility = new Grid
         {
@@ -147,13 +148,12 @@ internal sealed class SceneSettingsWindow : Window
         visibility.Children.Add(_cullingSelector);
         Grid.SetColumn(_layersButton, 2);
         visibility.Children.Add(_layersButton);
-        var maskLabel = CreateLabel(Localization.T("main.mask"), 1);
-        visibility.Children.Add(maskLabel);
+        visibility.Children.Add(CreateLabel(Localization.T("main.mask"), 1));
         Grid.SetRow(_maskStatus, 1);
         Grid.SetColumn(_maskStatus, 1);
         Grid.SetColumnSpan(_maskStatus, 2);
         visibility.Children.Add(_maskStatus);
-        content.Children.Add(BuildSection(Localization.T("settings.visibility"), visibility));
+        content.Children.Add(BuildSection(L("Visibility", "可见性"), visibility));
 
         var actions = new StackPanel
         {
@@ -164,7 +164,7 @@ internal sealed class SceneSettingsWindow : Window
         };
         var cancel = new Button { Content = Localization.T("main.cancel"), MinWidth = 90 };
         cancel.Click += (_, _) => Close();
-        var apply = new Button { Content = Localization.T("settings.apply"), MinWidth = 100 };
+        var apply = new Button { Content = L("Apply", "应用"), MinWidth = 100 };
         apply.Click += (_, _) => ApplyAndClose();
         actions.Children.Add(cancel);
         actions.Children.Add(apply);
@@ -213,8 +213,7 @@ internal sealed class SceneSettingsWindow : Window
 
         for (var row = 0; row < fields.Length; row++)
         {
-            var label = CreateLabel(fields[row].Label, row);
-            grid.Children.Add(label);
+            grid.Children.Add(CreateLabel(fields[row].Label, row));
             Grid.SetRow(fields[row].Control, row);
             Grid.SetColumn(fields[row].Control, 1);
             grid.Children.Add(fields[row].Control);
@@ -269,13 +268,15 @@ internal sealed class SceneSettingsWindow : Window
         {
             var error = new Window
             {
-                Title = Localization.T("settings.invalidTitle"),
+                Title = L("Invalid Scene Settings", "场景设置无效"),
                 Width = 440,
-                Height = 160,
+                Height = 170,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Content = new TextBlock
                 {
-                    Text = Localization.T("settings.invalidValues"),
+                    Text = L(
+                        "FOV must be 1-179, Ortho Size > 0, Far > Near, FPS 1-120, and manual resolution 64-4096.",
+                        "FOV 必须为 1-179，正交尺寸 > 0，远裁剪 > 近裁剪，FPS 为 1-120，手动分辨率为 64-4096。"),
                     TextWrapping = TextWrapping.Wrap,
                     Margin = new Thickness(18)
                 }
@@ -394,14 +395,16 @@ internal sealed class SceneSettingsWindow : Window
         _ = dialog.ShowDialog(this);
     }
 
-    private static CullingModeOption[] BuildCullingOptions() =>
+    private static CullingModeOption[] BuildCullingOptions() => new[]
     {
-        new(SceneCullingMode.All, Localization.T("main.cullingAll")),
-        new(SceneCullingMode.MainCamera, Localization.T("main.cullingMainCamera")),
-        new(SceneCullingMode.Manual, Localization.T("main.cullingManual"))
+        new CullingModeOption(SceneCullingMode.All, Localization.T("main.cullingAll")),
+        new CullingModeOption(SceneCullingMode.MainCamera, Localization.T("main.cullingMainCamera")),
+        new CullingModeOption(SceneCullingMode.Manual, Localization.T("main.cullingManual"))
     };
 
     private static string FormatMask(int mask) => $"0x{unchecked((uint)mask):X8}";
+
+    private static string L(string en, string zh) => Localization.IsChinese ? zh : en;
 
     private static bool TryParseFloat(string? text, out float value)
     {
