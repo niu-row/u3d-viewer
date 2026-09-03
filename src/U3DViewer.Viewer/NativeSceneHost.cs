@@ -41,6 +41,9 @@ internal sealed class NativeSceneHost : NativeControlHost
     }
 
     public event Action<string>? StatusChanged;
+    public event Action<float>? MoveSpeedChanged;
+
+    public float MoveSpeed => _moveSpeed;
 
     public void SetRenderTarget(RenderTargetInfo? target)
     {
@@ -51,6 +54,12 @@ internal sealed class NativeSceneHost : NativeControlHost
             ClosePresenter();
             SetStatus(target?.Status ?? "Waiting for the target game's Scene render target...");
             return;
+        }
+
+        if (target.MoveSpeed > 0f && Math.Abs(target.MoveSpeed - _moveSpeed) > 0.0001f)
+        {
+            _moveSpeed = Math.Clamp(target.MoveSpeed, 0.1f, 1000f);
+            MoveSpeedChanged?.Invoke(_moveSpeed);
         }
 
         var key = $"{target.SharedName}|{target.AdapterLuid:X16}|{target.Width}x{target.Height}|{target.DxgiFormat}";
@@ -277,6 +286,7 @@ internal sealed class NativeSceneHost : NativeControlHost
         {
             var multiplier = Math.Pow(1.25, input.WheelDelta);
             _moveSpeed = Math.Clamp((float)(_moveSpeed * multiplier), 0.1f, 1000f);
+            MoveSpeedChanged?.Invoke(_moveSpeed);
             _sendCommand(ViewerCommandCodec.EncodeCameraSpeed(_moveSpeed));
         }
 
