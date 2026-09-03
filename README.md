@@ -21,7 +21,9 @@ U3DViewer then automatically:
   -> detects Mono / IL2CPP
   -> installs the pinned matching BepInEx 6 x64 runtime when missing
   -> for IL2CPP, starts the game once when interop assemblies need generation
-  -> builds the Agent against that game's Unity assemblies
+  -> fingerprints the compatible Unity/interop API surface
+  -> reuses a cached Agent when that compatibility profile was built before
+  -> otherwise builds the Agent once and caches it
   -> deploys Agent + Protocol + NativeBridge
   -> launches/restarts the game
   -> waits for u3d-viewer-<PID>
@@ -29,6 +31,30 @@ U3DViewer then automatically:
 ```
 
 A running game selected through `Prepare + Restart` is only asked to close normally; U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process launched by U3DViewer itself may be terminated after interop generation completes.
+
+## Agent reuse and cache
+
+Agents are not rebuilt on every launch.
+
+U3DViewer stores compatible builds under:
+
+```text
+%LOCALAPPDATA%/U3DViewer/AgentCache/
+  Mono/<compatibility-fingerprint>/
+  IL2CPP/<compatibility-fingerprint>/
+```
+
+The fingerprint includes the selected backend, the bundled Agent/Protocol builder inputs, and SHA-256 hashes of the Unity assemblies that the Agent compiles against.
+
+This means:
+
+- reopening the same game normally uses the cache;
+- two games with identical compatible Unity assemblies can share the same Mono Agent cache entry;
+- two IL2CPP targets with identical generated Unity proxy assemblies can share the same IL2CPP cache entry;
+- a Unity/interop update automatically produces a new cache key;
+- changing U3DViewer Agent or Protocol source automatically invalidates the old cache.
+
+This is compatibility-based reuse rather than blindly loading one binary across every Unity version. A broader truly version-agnostic Mono Agent can be pursued later by moving more Unity API access behind runtime compatibility/reflection adapters.
 
 ## Build in VSCode
 
@@ -48,7 +74,9 @@ src/U3DViewer.Viewer/bin/Release/net8.0/agent-builder/...
 
 No target game path is needed during this build.
 
-The Viewer-side Agent Builder copies its bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, then runs the local .NET SDK only after a target game has been selected. Mono references come from `<Game>_Data/Managed`; IL2CPP references come from `BepInEx/interop` after BepInEx generates them.
+The Viewer-side Agent Builder copies its bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/` only when a compatibility profile has no cache entry. Mono references come from `<Game>_Data/Managed`; IL2CPP references come from `BepInEx/interop` after BepInEx generates them.
+
+A local .NET SDK is therefore required for the first build of a new compatibility profile. Cache hits do not invoke `dotnet build`.
 
 ## Runtime architecture
 
@@ -65,6 +93,7 @@ Unity Game.exe
 U3DViewer.Viewer.exe
 ├─ process picker
 ├─ automatic runtime preparation
+├─ compatibility Agent cache
 ├─ Runtime Hierarchy
 ├─ Runtime Inspector
 └─ Scene View
@@ -77,7 +106,8 @@ U3DViewer.Viewer.exe
 - per-process Agent pipes
 - GUI `Attach`, `Prepare + Restart`, and `Open Game...`
 - automatic BepInEx 6 x64 bootstrap when absent
-- automatic target-specific Agent build and deployment
+- automatic target-compatible Agent build and deployment
+- compatibility-keyed Agent reuse/cache
 - live Runtime Hierarchy
 - read-only Runtime Inspector
 - Scene Camera controls
@@ -88,7 +118,7 @@ U3DViewer.Viewer.exe
 
 - Windows x64 first
 - Scene transport currently requires Direct3D 11
-- the development build currently expects a local .NET SDK for on-demand Agent compilation
+- a new, uncached compatibility profile currently requires a local .NET SDK for Agent compilation
 - unusual/custom Unity launchers can require additional process discovery handling
 - Scene View is fixed at 1280x720 and currently uses GPU-to-CPU staging readback
 - picking, collider visualization and transform gizmos are not implemented yet
