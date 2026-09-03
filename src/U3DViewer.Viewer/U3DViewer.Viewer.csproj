@@ -12,4 +12,15 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
     <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
   </ItemGroup>
+
+  <Target Name="CopyLocalNativeBridge" AfterTargets="Build">
+    <PropertyGroup>
+      <NativeBridgePath>$(MSBuildProjectDirectory)\..\..\build\native\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgePath>
+    </PropertyGroup>
+    <Copy
+      SourceFiles="$(NativeBridgePath)"
+      DestinationFolder="$(OutputPath)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(NativeBridgePath)')" />
+  </Target>
 </Project>
