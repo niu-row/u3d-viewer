@@ -16,6 +16,7 @@ internal sealed class MainWindow : Window
 {
     private readonly ViewerConnection _connection = new();
     private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
+    private readonly Dictionary<int, HierarchyNode> _nodesByInstanceId = new();
     private readonly TreeView _hierarchy;
     private readonly TextBlock _connectionStatus;
     private readonly TextBlock _snapshotStatus;
@@ -107,6 +108,7 @@ internal sealed class MainWindow : Window
 
         _connection.StateChanged += state => Dispatcher.UIThread.Post(() => UpdateConnectionState(state));
         _connection.SnapshotReceived += snapshot => Dispatcher.UIThread.Post(() => ApplySnapshot(snapshot));
+        _connection.DeltaReceived += delta => Dispatcher.UIThread.Post(() => ApplyDelta(delta));
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
         Opened += (_, _) => _connection.Start();
@@ -404,7 +406,7 @@ internal sealed class MainWindow : Window
             case ConnectionState.Connected:
                 _connectionStatus.Text = "● Connected";
                 _connectionStatus.Foreground = Brushes.Green;
-                _connectionDetail.Text = "Receiving hierarchy and GPU Scene Camera state";
+                _connectionDetail.Text = "Receiving hierarchy deltas and GPU Scene Camera state";
                 break;
             default:
                 _connectionStatus.Text = "● Disconnected";
@@ -417,142 +419,213 @@ internal sealed class MainWindow : Window
 
     private void ApplySnapshot(SceneSnapshot snapshot)
     {
-        _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
+        _snapshotStatus.Text = $"Baseline #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
         SyncLensControls(snapshot.RenderTarget);
         _sceneHost.SetRenderTarget(snapshot.RenderTarget);
-        SyncScenes(snapshot.Scenes);
+        RebuildHierarchy(snapshot.Scenes);
+    }
 
-        if (_selectedNode?.GameObject is not null)
+    private void ApplyDelta(SceneDelta delta)
+    {
+        _snapshotStatus.Text = $"Delta #{delta.Sequence} · +{delta.Upserts.Length} / -{delta.RemovedInstanceIds.Length}";
+        SyncLensControls(delta.RenderTarget);
+        _sceneHost.SetRenderTarget(delta.RenderTarget);
+        SyncSceneHeaders(delta.Scenes);
+
+        foreach (var instanceId in delta.RemovedInstanceIds)
         {
-            RenderInspector(_selectedNode.GameObject);
+            if (_nodesByInstanceId.TryGetValue(instanceId, out var node))
+            {
+                DetachNode(node);
+            }
+        }
+
+        foreach (var upsert in delta.Upserts)
+        {
+            ApplyNodeDelta(upsert);
+        }
+
+        if (_selectedNode?.InstanceId is int selectedId && _nodesByInstanceId.TryGetValue(selectedId, out var selected))
+        {
+            _selectedNode = selected;
+            if (selected.GameObject is not null)
+            {
+                RenderInspector(selected.GameObject);
+            }
         }
     }
 
-    private void SyncScenes(IReadOnlyList<SceneInfo> scenes)
+    private void RebuildHierarchy(IReadOnlyList<SceneInfo> scenes)
+    {
+        _hierarchy.SelectedItem = null;
+        _selectedNode = null;
+        _nodesByInstanceId.Clear();
+        _rootNodes.Clear();
+        RenderEmptyInspector();
+
+        foreach (var scene in scenes)
+        {
+            var sceneNode = CreateSceneNode(scene);
+            _rootNodes.Add(sceneNode);
+            AppendGameObjects(sceneNode, scene.Roots);
+        }
+    }
+
+    private void SyncSceneHeaders(IReadOnlyList<SceneInfo> scenes)
     {
         var desiredKeys = new HashSet<string>();
-
         for (var index = 0; index < scenes.Count; index++)
         {
             var scene = scenes[index];
-            var key = $"scene:{scene.BuildIndex}:{scene.Name}";
+            var key = SceneKey(scene.BuildIndex, scene.Name);
             desiredKeys.Add(key);
 
             var node = _rootNodes.FirstOrDefault(item => item.Key == key);
             if (node is null)
             {
-                node = new HierarchyNode(key, null, $"Scene: {scene.Name}");
+                node = CreateSceneNode(scene);
                 _rootNodes.Insert(Math.Min(index, _rootNodes.Count), node);
             }
             else
             {
+                node.Label = $"Scene: {scene.Name}  [build {scene.BuildIndex}]";
                 var currentIndex = _rootNodes.IndexOf(node);
                 if (currentIndex != index && index < _rootNodes.Count)
                 {
                     _rootNodes.Move(currentIndex, index);
                 }
             }
-
-            node.Label = $"Scene: {scene.Name}  [build {scene.BuildIndex}]";
-            SyncGameObjects(node.Children, scene.Roots);
         }
 
         for (var index = _rootNodes.Count - 1; index >= 0; index--)
         {
-            if (!desiredKeys.Contains(_rootNodes[index].Key))
+            var sceneNode = _rootNodes[index];
+            if (desiredKeys.Contains(sceneNode.Key))
             {
-                _rootNodes.RemoveAt(index);
+                continue;
+            }
+
+            foreach (var child in sceneNode.Children.ToArray())
+            {
+                UnregisterSubtree(child);
+            }
+            _rootNodes.RemoveAt(index);
+        }
+    }
+
+    private static HierarchyNode CreateSceneNode(SceneInfo scene) =>
+        new(SceneKey(scene.BuildIndex, scene.Name), null, $"Scene: {scene.Name}  [build {scene.BuildIndex}]");
+
+    private static string SceneKey(int buildIndex, string name) => $"scene:{buildIndex}:{name}";
+
+    private void AppendGameObjects(HierarchyNode parent, IReadOnlyList<GameObjectInfo> objects)
+    {
+        foreach (var gameObject in objects)
+        {
+            if (gameObject.InstanceId == 0)
+            {
+                continue;
+            }
+
+            var node = new HierarchyNode($"go:{gameObject.InstanceId}", gameObject.InstanceId, gameObject.Name)
+            {
+                Parent = parent,
+                GameObject = gameObject
+            };
+            node.Label = gameObject.ActiveInHierarchy ? gameObject.Name : $"{gameObject.Name} (inactive)";
+            parent.Children.Add(node);
+            _nodesByInstanceId[gameObject.InstanceId] = node;
+            AppendGameObjects(node, gameObject.Children);
+        }
+    }
+
+    private void ApplyNodeDelta(SceneNodeDelta delta)
+    {
+        if (delta.InstanceId == 0)
+        {
+            return;
+        }
+
+        var sceneNode = _rootNodes.FirstOrDefault(item => item.Key == SceneKey(delta.SceneBuildIndex, delta.SceneName));
+        if (sceneNode is null)
+        {
+            sceneNode = new HierarchyNode(
+                SceneKey(delta.SceneBuildIndex, delta.SceneName),
+                null,
+                $"Scene: {delta.SceneName}  [build {delta.SceneBuildIndex}]");
+            _rootNodes.Add(sceneNode);
+        }
+
+        var desiredParent = delta.ParentInstanceId == 0
+            ? sceneNode
+            : _nodesByInstanceId.TryGetValue(delta.ParentInstanceId, out var parentNode)
+                ? parentNode
+                : sceneNode;
+
+        if (!_nodesByInstanceId.TryGetValue(delta.InstanceId, out var node))
+        {
+            node = new HierarchyNode($"go:{delta.InstanceId}", delta.InstanceId, delta.GameObject.Name);
+            _nodesByInstanceId[delta.InstanceId] = node;
+        }
+
+        if (!ReferenceEquals(node.Parent, desiredParent))
+        {
+            node.Parent?.Children.Remove(node);
+            node.Parent = desiredParent;
+        }
+
+        var targetIndex = Math.Clamp(delta.SiblingIndex, 0, desiredParent.Children.Count);
+        var currentIndex = desiredParent.Children.IndexOf(node);
+        if (currentIndex < 0)
+        {
+            desiredParent.Children.Insert(targetIndex, node);
+        }
+        else if (currentIndex != targetIndex)
+        {
+            var moveTarget = targetIndex;
+            if (moveTarget >= desiredParent.Children.Count)
+            {
+                moveTarget = desiredParent.Children.Count - 1;
+            }
+            if (moveTarget >= 0)
+            {
+                desiredParent.Children.Move(currentIndex, moveTarget);
             }
         }
 
-        if (_selectedNode?.InstanceId is int selectedId)
+        node.GameObject = delta.GameObject;
+        node.Label = delta.GameObject.ActiveInHierarchy
+            ? delta.GameObject.Name
+            : $"{delta.GameObject.Name} (inactive)";
+    }
+
+    private void DetachNode(HierarchyNode node)
+    {
+        node.Parent?.Children.Remove(node);
+        UnregisterSubtree(node);
+    }
+
+    private void UnregisterSubtree(HierarchyNode node)
+    {
+        foreach (var child in node.Children.ToArray())
         {
-            var refreshed = FindByInstanceId(selectedId);
-            if (refreshed is null)
+            UnregisterSubtree(child);
+        }
+
+        if (node.InstanceId is int instanceId)
+        {
+            _nodesByInstanceId.Remove(instanceId);
+            if (_selectedNode?.InstanceId == instanceId)
             {
                 _selectedNode = null;
                 _hierarchy.SelectedItem = null;
                 RenderEmptyInspector();
             }
-            else if (!ReferenceEquals(refreshed, _selectedNode))
-            {
-                _selectedNode = refreshed;
-                _hierarchy.SelectedItem = refreshed;
-            }
         }
     }
 
-    private static void SyncGameObjects(ObservableCollection<HierarchyNode> target, IReadOnlyList<GameObjectInfo> objects)
-    {
-        var desiredIds = new HashSet<int>();
-
-        for (var index = 0; index < objects.Count; index++)
-        {
-            var gameObject = objects[index];
-            desiredIds.Add(gameObject.InstanceId);
-
-            var node = target.FirstOrDefault(item => item.InstanceId == gameObject.InstanceId);
-            if (node is null)
-            {
-                node = new HierarchyNode($"go:{gameObject.InstanceId}", gameObject.InstanceId, gameObject.Name);
-                target.Insert(Math.Min(index, target.Count), node);
-            }
-            else
-            {
-                var currentIndex = target.IndexOf(node);
-                if (currentIndex != index && index < target.Count)
-                {
-                    target.Move(currentIndex, index);
-                }
-            }
-
-            node.GameObject = gameObject;
-            node.Label = gameObject.ActiveInHierarchy ? gameObject.Name : $"{gameObject.Name} (inactive)";
-            SyncGameObjects(node.Children, gameObject.Children);
-        }
-
-        for (var index = target.Count - 1; index >= 0; index--)
-        {
-            var instanceId = target[index].InstanceId;
-            if (instanceId is int id && !desiredIds.Contains(id))
-            {
-                target.RemoveAt(index);
-            }
-        }
-    }
-
-    private HierarchyNode? FindByInstanceId(int instanceId)
-    {
-        foreach (var root in _rootNodes)
-        {
-            var match = FindByInstanceId(root, instanceId);
-            if (match is not null)
-            {
-                return match;
-            }
-        }
-
-        return null;
-    }
-
-    private static HierarchyNode? FindByInstanceId(HierarchyNode node, int instanceId)
-    {
-        if (node.InstanceId == instanceId)
-        {
-            return node;
-        }
-
-        foreach (var child in node.Children)
-        {
-            var match = FindByInstanceId(child, instanceId);
-            if (match is not null)
-            {
-                return match;
-            }
-        }
-
-        return null;
-    }
+    private HierarchyNode? FindByInstanceId(int instanceId) =>
+        _nodesByInstanceId.TryGetValue(instanceId, out var node) ? node : null;
 
     private void OnHierarchySelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -646,6 +719,7 @@ internal sealed class MainWindow : Window
 
         public string Key { get; }
         public int? InstanceId { get; }
+        public HierarchyNode? Parent { get; set; }
         public ObservableCollection<HierarchyNode> Children { get; } = new();
         public GameObjectInfo? GameObject { get; set; }
 
