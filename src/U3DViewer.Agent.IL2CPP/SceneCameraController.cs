@@ -49,6 +49,9 @@ internal sealed class SceneCameraController : IDisposable
     private double _averageRenderMs;
     private double _maxRenderMs;
     private long _renderSamples;
+    private float _sceneFpsWindowStart;
+    private int _sceneFpsWindowFrames;
+    private double _sceneFps;
 
     public void Apply(ViewerCommand command)
     {
@@ -130,6 +133,7 @@ internal sealed class SceneCameraController : IDisposable
             _camera.Render();
             GL.IssuePluginEvent(_renderEvent, _copyEventId);
             RecordRenderTiming(ElapsedMilliseconds(started));
+            RecordRenderFrame(now);
         }
         catch (Exception ex)
         {
@@ -171,6 +175,7 @@ internal sealed class SceneCameraController : IDisposable
 
     public void PopulatePerformance(PerformanceInfo performance)
     {
+        performance.SceneFps = _sceneFps;
         performance.SceneRenderMs = _lastRenderMs;
         performance.SceneRenderAverageMs = _averageRenderMs;
         performance.SceneRenderMaxMs = _maxRenderMs;
@@ -328,6 +333,26 @@ internal sealed class SceneCameraController : IDisposable
         _renderSamples++;
         _averageRenderMs += (milliseconds - _averageRenderMs) / _renderSamples;
         _maxRenderMs = Math.Max(_maxRenderMs, milliseconds);
+    }
+
+    private void RecordRenderFrame(float now)
+    {
+        if (_sceneFpsWindowStart <= 0f)
+        {
+            _sceneFpsWindowStart = now;
+            _sceneFpsWindowFrames = 0;
+        }
+
+        _sceneFpsWindowFrames++;
+        var elapsed = now - _sceneFpsWindowStart;
+        if (elapsed < 0.5f)
+        {
+            return;
+        }
+
+        _sceneFps = elapsed > 0f ? _sceneFpsWindowFrames / elapsed : 0d;
+        _sceneFpsWindowStart = now;
+        _sceneFpsWindowFrames = 0;
     }
 
     private static double ElapsedMilliseconds(long started) =>
