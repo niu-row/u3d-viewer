@@ -40,6 +40,7 @@ internal static class Program
             ProcessPickerWindow? picker = null;
             picker = new ProcessPickerWindow(target =>
             {
+                ViewerLog.BindToGame(target.ExecutablePath);
                 ViewerLog.Info($"Opening Viewer for {target.ProcessName} (PID {target.ProcessId}, {target.Backend}).");
                 ViewerSession.Target = target;
 
