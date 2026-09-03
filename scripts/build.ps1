@@ -20,6 +20,10 @@ function Get-ConfigValue {
         [string] $Default = ""
     )
 
+    if ($null -eq $Config) {
+        return $Default
+    }
+
     $property = $Config.PSObject.Properties[$Name]
     if ($null -eq $property) {
         return $Default
@@ -83,7 +87,7 @@ function Test-ReferenceSet {
     return $true
 }
 
-function Sync-UnityReferences {
+function Try-SyncUnityReferences {
     param(
         [Parameter(Mandatory = $true)] [string] $Backend,
         [Parameter(Mandatory = $true)] [string] $GamePath,
@@ -92,11 +96,11 @@ function Sync-UnityReferences {
     )
 
     if (Test-ReferenceSet -Directory $AgentLib -Files $Files) {
-        return
+        return $true
     }
 
     if ([string]::IsNullOrWhiteSpace($GamePath) -or -not (Test-Path $GamePath -PathType Container)) {
-        throw "Unity references are missing and gamePath is not valid. Set gamePath in u3dviewer.local.json."
+        return $false
     }
 
     $sourceDirectory = $null
@@ -104,8 +108,6 @@ function Sync-UnityReferences {
         $candidate = Join-Path $GamePath "BepInEx/interop"
         if (Test-ReferenceSet -Directory $candidate -Files $Files) {
             $sourceDirectory = $candidate
-        } else {
-            throw "IL2CPP interop references were not found in '$candidate'. Run the game with BepInEx once, then build again."
         }
     } else {
         $dataDirectories = Get-ChildItem -Path $GamePath -Directory -Filter "*_Data" -ErrorAction SilentlyContinue
@@ -116,10 +118,10 @@ function Sync-UnityReferences {
                 break
             }
         }
+    }
 
-        if ($null -eq $sourceDirectory) {
-            throw "Mono Unity references were not found under '$GamePath/*_Data/Managed'."
-        }
+    if ($null -eq $sourceDirectory) {
+        return $false
     }
 
     New-Item -ItemType Directory -Force -Path $AgentLib | Out-Null
@@ -127,19 +129,22 @@ function Sync-UnityReferences {
         Copy-Item -Force (Join-Path $sourceDirectory $file) (Join-Path $AgentLib $file)
     }
 
-    Write-Host "Staged Unity references from: $sourceDirectory" -ForegroundColor DarkCyan
+    Write-Host "Staged $Backend Unity references from: $sourceDirectory" -ForegroundColor DarkCyan
+    return $true
 }
 
-if (-not (Test-Path $configFile)) {
-    throw "Missing $ConfigPath. Run the VSCode task 'U3DViewer: Create Local Config', then edit backend/gamePath."
+$config = $null
+if (Test-Path $configFile -PathType Leaf) {
+    try {
+        $config = Get-Content -Raw $configFile | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning "Could not read $ConfigPath; continuing without local game configuration: $($_.Exception.Message)"
+    }
 }
 
-$config = Get-Content -Raw $configFile | ConvertFrom-Json
 $backend = (Get-ConfigValue -Config $config -Name "backend").Trim().ToUpperInvariant()
 $gamePath = Get-ConfigValue -Config $config -Name "gamePath"
-if ($backend -notin @("MONO", "IL2CPP")) {
-    throw "backend must be either 'Mono' or 'IL2CPP' in $ConfigPath."
-}
 
 if ([string]::IsNullOrWhiteSpace($Configuration)) {
     $Configuration = Get-ConfigValue -Config $config -Name "configuration" -Default "Release"
@@ -149,9 +154,6 @@ if ($Configuration -notin @("Debug", "Release")) {
 }
 
 $cmake = Resolve-CMake
-$agentFolder = if ($backend -eq "MONO") { "U3DViewer.Agent.Mono" } else { "U3DViewer.Agent.IL2CPP" }
-$agentProject = Join-Path $repoRoot "src/$agentFolder/$agentFolder.csproj"
-$agentLib = Join-Path $repoRoot "src/$agentFolder/lib"
 $viewerProject = Join-Path $repoRoot "src/U3DViewer.Viewer/U3DViewer.Viewer.csproj"
 $nativeSource = Join-Path $repoRoot "native/U3DViewer.NativeBridge"
 $nativeBuild = Join-Path $repoRoot "build/native"
@@ -161,14 +163,45 @@ $requiredUnityAssemblies = @(
     "UnityEngine.SceneManagementModule.dll"
 )
 
-Sync-UnityReferences -Backend $backend -GamePath $gamePath -AgentLib $agentLib -Files $requiredUnityAssemblies
+$agentDefinitions = @(
+    [PSCustomObject]@{
+        Backend = "MONO"
+        Folder = "U3DViewer.Agent.Mono"
+    },
+    [PSCustomObject]@{
+        Backend = "IL2CPP"
+        Folder = "U3DViewer.Agent.IL2CPP"
+    }
+)
+
+$agentsToBuild = @()
+foreach ($definition in $agentDefinitions) {
+    $agentLib = Join-Path $repoRoot "src/$($definition.Folder)/lib"
+    $hasReferences = Test-ReferenceSet -Directory $agentLib -Files $requiredUnityAssemblies
+
+    if (-not $hasReferences -and $backend -eq $definition.Backend) {
+        $hasReferences = Try-SyncUnityReferences `
+            -Backend $definition.Backend `
+            -GamePath $gamePath `
+            -AgentLib $agentLib `
+            -Files $requiredUnityAssemblies
+    }
+
+    if ($hasReferences) {
+        $agentsToBuild += $definition
+    }
+}
 
 Push-Location $repoRoot
 try {
     Write-Host "U3DViewer local build" -ForegroundColor Green
-    Write-Host "Backend:       $backend"
     Write-Host "Configuration: $Configuration"
-    Write-Host "Game:          $gamePath"
+
+    if (-not [string]::IsNullOrWhiteSpace($gamePath)) {
+        Write-Host "Configured game: $gamePath"
+    } else {
+        Write-Host "Configured game: <none> (GUI game selection remains available)"
+    }
 
     Invoke-External "Configure NativeBridge (x64)" {
         & $cmake -S $nativeSource -B $nativeBuild -A x64
@@ -178,8 +211,17 @@ try {
         & $cmake --build $nativeBuild --config $Configuration --parallel
     }
 
-    Invoke-External "Build $agentFolder" {
-        & dotnet build $agentProject -c $Configuration --nologo
+    foreach ($definition in $agentsToBuild) {
+        $agentProject = Join-Path $repoRoot "src/$($definition.Folder)/$($definition.Folder).csproj"
+        Invoke-External "Build $($definition.Folder)" {
+            & dotnet build $agentProject -c $Configuration --nologo
+        }
+    }
+
+    if ($agentsToBuild.Count -eq 0) {
+        Write-Warning "No Agent payload was built because no staged Unity references were found. Viewer/NativeBridge will still build. To enable GUI Install/Open Game for a backend, set gamePath once or stage that backend's Unity references."
+    } elseif (-not [string]::IsNullOrWhiteSpace($backend) -and $backend -in @("MONO", "IL2CPP") -and -not ($agentsToBuild.Backend -contains $backend)) {
+        Write-Warning "$backend Agent payload was not built because matching Unity references could not be found. Viewer/NativeBridge will still build."
     }
 
     Invoke-External "Build U3DViewer.Viewer" {
@@ -193,6 +235,10 @@ try {
     Write-Host "Build completed." -ForegroundColor Green
     Write-Host "NativeBridge: $nativeDll"
     Write-Host "Viewer:       $viewerExe"
+
+    if ($agentsToBuild.Count -gt 0) {
+        Write-Host "Agent payloads: $($agentsToBuild.Backend -join ', ')"
+    }
 }
 finally {
     Pop-Location
