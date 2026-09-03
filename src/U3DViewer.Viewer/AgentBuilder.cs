@@ -61,7 +61,7 @@ internal static class AgentBuilder
             try
             {
                 var fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, references!);
-                if (TryGetCachedAgent(backend, fingerprint, out _, out _))
+                if (TryGetCachedAgent(executablePath, backend, fingerprint, out _, out _))
                 {
                     return true;
                 }
@@ -218,7 +218,7 @@ internal static class AgentBuilder
             return new AgentBuildResult(false, $"Could not fingerprint the selected game's Unity runtime: {ex.Message}");
         }
 
-        if (TryGetCachedAgent(backend, fingerprint, out var cachedAgent, out var cachedProtocol))
+        if (TryGetCachedAgent(executablePath, backend, fingerprint, out var cachedAgent, out var cachedProtocol))
         {
             progress?.Report($"Using cached {backend} Agent ({ShortFingerprint(fingerprint)}). No rebuild needed.");
             ViewerLog.Info($"Agent cache hit: {cachedAgent}");
@@ -237,12 +237,7 @@ internal static class AgentBuilder
             return new AgentBuildResult(false, message);
         }
 
-        var workspace = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "U3DViewer",
-            "AgentBuilder",
-            "Work",
-            $"{backend}-{Environment.ProcessId}");
+        var workspace = ViewerPaths.GetAgentBuildWorkspace(executablePath, backend);
 
         try
         {
@@ -342,7 +337,7 @@ internal static class AgentBuilder
 
         try
         {
-            var cacheDirectory = GetCacheDirectory(backend, fingerprint);
+            var cacheDirectory = GetCacheDirectory(executablePath, backend, fingerprint);
             Directory.CreateDirectory(cacheDirectory);
 
             var cacheAgent = Path.Combine(cacheDirectory, Path.GetFileName(agentPath));
@@ -360,6 +355,7 @@ internal static class AgentBuilder
 
             progress?.Report($"Cached {backend} Agent profile {ShortFingerprint(fingerprint)} for future launches.");
             ViewerLog.Info($"Cached Agent at: {cacheAgent}");
+            TryDeleteDirectory(workspace);
             return new AgentBuildResult(
                 true,
                 $"{backend} Agent built and cached successfully.",
@@ -543,12 +539,13 @@ internal static class AgentBuilder
     }
 
     private static bool TryGetCachedAgent(
+        string executablePath,
         string backend,
         string fingerprint,
         out string agentPath,
         out string protocolPath)
     {
-        var cacheDirectory = GetCacheDirectory(backend, fingerprint);
+        var cacheDirectory = GetCacheDirectory(executablePath, backend, fingerprint);
         var projectFolder = GetProjectFolder(backend);
         agentPath = Path.Combine(cacheDirectory, projectFolder + ".dll");
         protocolPath = Path.Combine(cacheDirectory, "U3DViewer.Protocol.dll");
@@ -557,13 +554,8 @@ internal static class AgentBuilder
                File.Exists(protocolPath) && new FileInfo(protocolPath).Length > 0;
     }
 
-    private static string GetCacheDirectory(string backend, string fingerprint) =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "U3DViewer",
-            "AgentCache",
-            backend,
-            fingerprint);
+    private static string GetCacheDirectory(string executablePath, string backend, string fingerprint) =>
+        ViewerPaths.GetAgentCacheDirectory(executablePath, backend, fingerprint);
 
     private static string GetSourceRoot() =>
         Path.Combine(AppContext.BaseDirectory, "agent-builder");
@@ -630,6 +622,21 @@ internal static class AgentBuilder
             var target = Path.Combine(destination, Path.GetRelativePath(source, file));
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             File.Copy(file, target, overwrite: true);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.Warning($"Could not remove temporary Agent build workspace '{path}': {ex.Message}");
         }
     }
 
