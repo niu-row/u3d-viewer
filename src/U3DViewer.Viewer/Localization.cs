@@ -30,10 +30,7 @@ internal static class Localization
     internal const string SkipAutoTranslateClass = "u3d-localization-skip";
 
     private static readonly ConditionalWeakTable<Window, object> AttachedWindows = new();
-    private static readonly string SettingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "U3DViewer",
-        "language.txt");
+    private static readonly string SettingsPath = ViewerPaths.ViewerLanguagePath;
 
     private static readonly IReadOnlyDictionary<string, (string En, string Zh)> Text =
         new Dictionary<string, (string En, string Zh)>(StringComparer.Ordinal)
