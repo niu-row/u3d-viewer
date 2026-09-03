@@ -20,6 +20,8 @@ internal sealed class SceneCameraController : IDisposable
     private IntPtr _renderEvent;
     private int _copyEventId;
     private int _dxgiFormat;
+    private ulong _adapterLuid;
+    private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
     private string _renderStatus = "Scene Camera has not initialized yet.";
 
@@ -102,6 +104,8 @@ internal sealed class SceneCameraController : IDisposable
             Width = RenderWidth,
             Height = RenderHeight,
             DxgiFormat = _dxgiFormat,
+            AdapterLuid = _adapterLuid,
+            AdapterName = _adapterName,
             Status = _renderStatus
         };
     }
@@ -164,9 +168,11 @@ internal sealed class SceneCameraController : IDisposable
             _renderEvent = NativeBridge.U3DViewer_GetRenderEventFunc();
             _copyEventId = NativeBridge.U3DViewer_GetCopyEventId();
             _dxgiFormat = NativeBridge.U3DViewer_GetSourceDxgiFormat();
+            _adapterLuid = NativeBridge.U3DViewer_GetSourceAdapterLuid();
+            _adapterName = SystemInfo.graphicsDeviceName ?? string.Empty;
             _bridgeReady = _renderEvent != IntPtr.Zero;
             _renderStatus = _bridgeReady
-                ? "D3D11 shared Scene render target is ready."
+                ? $"D3D11 shared Scene render target is ready on {DisplayAdapterName(_adapterName)}."
                 : "NativeBridge did not return a render event callback.";
         }
         catch (DllNotFoundException)
@@ -182,6 +188,9 @@ internal sealed class SceneCameraController : IDisposable
             _renderStatus = $"NativeBridge initialization failed: {ex.Message}";
         }
     }
+
+    private static string DisplayAdapterName(string value) =>
+        string.IsNullOrWhiteSpace(value) ? "an unknown GPU" : value;
 
     private void CopyFromGameCamera()
     {
