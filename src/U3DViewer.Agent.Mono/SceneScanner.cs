@@ -6,7 +6,7 @@ namespace U3DViewer.Agent.Mono;
 
 internal static class SceneScanner
 {
-    public static SceneSnapshot Capture(long sequence)
+    public static SceneSnapshot Capture(long sequence, int selectedInstanceId)
     {
         var scenes = new SceneInfo[SceneManager.sceneCount];
 
@@ -18,7 +18,7 @@ internal static class SceneScanner
 
             for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
             {
-                rootInfos[rootIndex] = CaptureGameObject(roots[rootIndex]);
+                rootInfos[rootIndex] = CaptureGameObject(roots[rootIndex], selectedInstanceId);
             }
 
             scenes[i] = new SceneInfo
@@ -38,42 +38,57 @@ internal static class SceneScanner
         };
     }
 
-    private static GameObjectInfo CaptureGameObject(GameObject gameObject)
+    private static GameObjectInfo CaptureGameObject(GameObject gameObject, int selectedInstanceId)
     {
+        var instanceId = gameObject.GetInstanceID();
         var transform = gameObject.transform;
         var children = new GameObjectInfo[transform.childCount];
 
         for (var i = 0; i < transform.childCount; i++)
         {
-            children[i] = CaptureGameObject(transform.GetChild(i).gameObject);
+            children[i] = CaptureGameObject(transform.GetChild(i).gameObject, selectedInstanceId);
         }
 
-        var components = gameObject.GetComponents<Component>();
-        var componentNames = new List<string>(components.Length);
-        foreach (var component in components)
-        {
-            if (component != null)
-            {
-                componentNames.Add(component.GetType().FullName ?? component.GetType().Name);
-            }
-        }
+        var isSelected = instanceId == selectedInstanceId;
+        var transformInfo = new TransformInfo();
+        var componentNames = Array.Empty<string>();
+        var layer = 0;
+        var tag = string.Empty;
 
-        return new GameObjectInfo
+        if (isSelected)
         {
-            InstanceId = gameObject.GetInstanceID(),
-            Name = gameObject.name ?? string.Empty,
-            ActiveSelf = gameObject.activeSelf,
-            ActiveInHierarchy = gameObject.activeInHierarchy,
-            Layer = gameObject.layer,
-            Tag = ReadTag(gameObject),
-            Transform = new TransformInfo
+            layer = gameObject.layer;
+            tag = ReadTag(gameObject);
+            transformInfo = new TransformInfo
             {
                 Position = ToInfo(transform.position),
                 LocalPosition = ToInfo(transform.localPosition),
                 EulerAngles = ToInfo(transform.eulerAngles),
                 LocalScale = ToInfo(transform.localScale)
-            },
-            Components = componentNames.ToArray(),
+            };
+
+            var components = gameObject.GetComponents<Component>();
+            var names = new List<string>(components.Length);
+            foreach (var component in components)
+            {
+                if (component != null)
+                {
+                    names.Add(component.GetType().FullName ?? component.GetType().Name);
+                }
+            }
+            componentNames = names.ToArray();
+        }
+
+        return new GameObjectInfo
+        {
+            InstanceId = instanceId,
+            Name = gameObject.name ?? string.Empty,
+            ActiveSelf = gameObject.activeSelf,
+            ActiveInHierarchy = gameObject.activeInHierarchy,
+            Layer = layer,
+            Tag = tag,
+            Transform = transformInfo,
+            Components = componentNames,
             Children = children
         };
     }
