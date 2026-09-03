@@ -1,0 +1,93 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "U3DViewer: Build + Deploy",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "U3DViewer: Build",
+        "U3DViewer: Deploy"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "U3DViewer: Build",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/build.ps1"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "U3DViewer: Deploy",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/deploy.ps1"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "U3DViewer: Build + Deploy + Run Viewer",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "U3DViewer: Build",
+        "U3DViewer: Deploy + Run Viewer"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "U3DViewer: Deploy + Run Viewer",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/deploy.ps1",
+        "-LaunchViewer"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "U3DViewer: Create Local Config",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "if (Test-Path '${workspaceFolder}/u3dviewer.local.json') { Write-Host 'u3dviewer.local.json already exists.' } else { Copy-Item '${workspaceFolder}/u3dviewer.local.json.example' '${workspaceFolder}/u3dviewer.local.json'; Write-Host 'Created u3dviewer.local.json. Edit backend and gamePath, then press Ctrl+Shift+B.' }"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
