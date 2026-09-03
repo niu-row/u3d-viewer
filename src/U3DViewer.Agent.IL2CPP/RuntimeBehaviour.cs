@@ -1,4 +1,5 @@
 using BepInEx.Logging;
+using U3DViewer.Protocol;
 using UnityEngine;
 
 namespace U3DViewer.Agent.IL2CPP;
@@ -14,6 +15,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static SceneCameraController? _sceneCamera;
     private static SceneScanner.SceneScanSession? _sceneScan;
     private static Task<string>? _snapshotSerialization;
+    private static SceneSnapshot? _pendingPublishedSnapshot;
+    private static SceneSnapshot? _lastPublishedSnapshot;
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
@@ -35,6 +38,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sceneCamera = new SceneCameraController();
         _sceneScan = null;
         _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+        _lastPublishedSnapshot = null;
         _nextSnapshotAt = 0f;
         _sequence = 0;
         _selectedInstanceId = 0;
@@ -44,8 +49,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     internal static void Shutdown()
     {
         RestoreBackgroundExecution();
-        _sceneScan = null;
-        _snapshotSerialization = null;
+        ResetSnapshotState();
         _pipeServer = null;
         _log = null;
     }
@@ -55,8 +59,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
-            _sceneScan = null;
-            _snapshotSerialization = null;
+            ResetSnapshotState();
             _nextSnapshotAt = 0f;
             return;
         }
@@ -72,11 +75,12 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             try
             {
-                if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
+                if (command.Kind == ViewerCommandKind.SelectObject)
                 {
                     _selectedInstanceId = command.InstanceId;
                     _sceneScan = null;
                     _snapshotSerialization = null;
+                    _pendingPublishedSnapshot = null;
                     _nextSnapshotAt = 0f;
                     continue;
                 }
@@ -130,9 +134,11 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
 
-            // Snapshot data contains no live Unity objects after the incremental scan completes,
-            // so JSON construction can safely run away from the Unity main thread.
-            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
+            var previous = _lastPublishedSnapshot;
+            _pendingPublishedSnapshot = snapshot;
+            _snapshotSerialization = Task.Run(() => previous is null
+                ? JsonSnapshotWriter.Write(snapshot)
+                : JsonSnapshotWriter.Write(SceneDeltaBuilder.Build(previous, snapshot)));
         }
         catch (Exception ex)
         {
@@ -145,8 +151,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     public void OnDestroy()
     {
         RestoreBackgroundExecution();
-        _sceneScan = null;
-        _snapshotSerialization = null;
+        ResetSnapshotState();
         _sceneCamera?.Dispose();
         _sceneCamera = null;
     }
@@ -159,17 +164,29 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             return;
         }
 
+        var publishedSnapshot = _pendingPublishedSnapshot;
         _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+
         if (task.Status == TaskStatus.RanToCompletion)
         {
             pipeServer.Publish(task.Result);
+            _lastPublishedSnapshot = publishedSnapshot;
             return;
         }
 
         if (task.IsFaulted)
         {
-            _log?.LogError($"Failed to serialize IL2CPP scene snapshot: {task.Exception?.GetBaseException().Message}");
+            _log?.LogError($"Failed to serialize IL2CPP scene update: {task.Exception?.GetBaseException().Message}");
         }
+    }
+
+    private static void ResetSnapshotState()
+    {
+        _sceneScan = null;
+        _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+        _lastPublishedSnapshot = null;
     }
 
     private static void RestoreBackgroundExecution()
