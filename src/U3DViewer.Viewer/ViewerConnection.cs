@@ -39,6 +39,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
 
     public event Action<ConnectionState>? StateChanged;
     public event Action<SceneSnapshot>? SnapshotReceived;
+    public event Action<SceneDelta>? DeltaReceived;
     public event Action<Exception>? Error;
 
     public void Start()
@@ -98,11 +99,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
 
                         try
                         {
-                            var snapshot = JsonSerializer.Deserialize<SceneSnapshot>(line, _jsonOptions);
-                            if (snapshot is not null)
-                            {
-                                SnapshotReceived?.Invoke(snapshot);
-                            }
+                            DispatchSceneMessage(line);
                         }
                         catch (JsonException ex)
                         {
@@ -155,6 +152,37 @@ internal sealed class ViewerConnection : IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
+                break;
+            }
+        }
+    }
+
+    private void DispatchSceneMessage(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        if (!document.RootElement.TryGetProperty("type", out var typeElement))
+        {
+            return;
+        }
+
+        switch (typeElement.GetString())
+        {
+            case "scene_snapshot":
+            {
+                var snapshot = JsonSerializer.Deserialize<SceneSnapshot>(line, _jsonOptions);
+                if (snapshot is not null)
+                {
+                    SnapshotReceived?.Invoke(snapshot);
+                }
+                break;
+            }
+            case "scene_delta":
+            {
+                var delta = JsonSerializer.Deserialize<SceneDelta>(line, _jsonOptions);
+                if (delta is not null)
+                {
+                    DeltaReceived?.Invoke(delta);
+                }
                 break;
             }
         }
