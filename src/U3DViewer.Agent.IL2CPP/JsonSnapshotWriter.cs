@@ -69,6 +69,8 @@ internal static class JsonSnapshotWriter
     private static void WritePerformance(StringBuilder sb, PerformanceInfo performance)
     {
         sb.Append('{');
+        DoubleProperty(sb, "gameFps", performance.GameFps); sb.Append(',');
+        DoubleProperty(sb, "sceneFps", performance.SceneFps); sb.Append(',');
         NumberProperty(sb, "hierarchyNodes", performance.HierarchyNodes); sb.Append(',');
         DoubleProperty(sb, "hierarchyScanMs", performance.HierarchyScanMs); sb.Append(',');
         DoubleProperty(sb, "hierarchyScanAverageMs", performance.HierarchyScanAverageMs); sb.Append(',');
