@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
@@ -27,6 +28,7 @@ internal static class Localization
     private const string English = "en-US";
     private const string ChineseSimplified = "zh-CN";
 
+    private static readonly ConditionalWeakTable<Window, object> AttachedWindows = new();
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "U3DViewer",
@@ -130,10 +132,11 @@ internal static class Localization
 
     public static void Attach(Window window)
     {
-        if (window.Content is not Control originalContent || originalContent.Tag is LocalizationMarker)
+        if (window.Content is not Control originalContent || AttachedWindows.TryGetValue(window, out _))
         {
             return;
         }
+        AttachedWindows.Add(window, new object());
 
         var selector = new ComboBox
         {
@@ -161,8 +164,7 @@ internal static class Localization
 
         var wrapper = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,*"),
-            Tag = new LocalizationMarker()
+            RowDefinitions = new RowDefinitions("Auto,*")
         };
         wrapper.Children.Add(new Border
         {
@@ -254,28 +256,20 @@ internal static class Localization
     {
         var result = Regex.Replace(input, @"^Found (\d+) Unity process\(es\) · (\d+) ready$", "发现 $1 个 Unity 进程 · $2 个已就绪");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^(.+) · PID (\d+) · Agent ready$", "$1 · PID $2 · Agent 已就绪");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^(.+) detected\. U3DViewer can prepare the runtime and restart this game automatically\.$", "已检测到 $1。U3DViewer 可以自动准备运行环境并重启游戏。");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^Process scan failed: (.+)$", "进程扫描失败：$1");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^Operation failed: (.+)$", "操作失败：$1");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^Snapshot #(\d+) · (\d+) scene\(s\)$", "快照 #$1 · $2 个场景");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^Scene: (.+)  \[build (-?\d+)\]$", "场景：$1  [build $2]");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^(.+) \(inactive\)$", "$1（未激活）");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^Speed ([0-9.]+) u/s$", "速度 $1 单位/秒");
         if (result != input) return result;
 
@@ -291,8 +285,9 @@ internal static class Localization
         result = ReplacePrefix(result, "Local Scale:    ", "本地缩放：      ");
         result = Regex.Replace(result, @"^Components \((\d+)\)$", "组件（$1）");
 
-        result = result
+        return result
             .Replace("Perf · Render CPU ", "性能 · 渲染 CPU ", StringComparison.Ordinal)
+            .Replace("Perf · Render ", "性能 · 渲染 ", StringComparison.Ordinal)
             .Replace("(avg ", "（平均 ", StringComparison.Ordinal)
             .Replace(", max ", "，最大 ", StringComparison.Ordinal)
             .Replace(") · Hierarchy ", "）· 层级 ", StringComparison.Ordinal)
@@ -301,36 +296,26 @@ internal static class Localization
             .Replace("RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus", "右键 + 鼠标观察 · 右键 + WASD/QE 飞行 · Shift 加速 · 滚轮调速 · F 聚焦", StringComparison.Ordinal)
             .Replace("Game GPU:", "游戏 GPU：", StringComparison.Ordinal)
             .Replace("Viewer GPU:", "Viewer GPU：", StringComparison.Ordinal);
-
-        return result;
     }
 
     private static string TranslateDynamicToEnglish(string input)
     {
         var result = Regex.Replace(input, @"^发现 (\d+) 个 Unity 进程 · (\d+) 个已就绪$", "Found $1 Unity process(es) · $2 ready");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^(.+) · PID (\d+) · Agent 已就绪$", "$1 · PID $2 · Agent ready");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^已检测到 (.+)。U3DViewer 可以自动准备运行环境并重启游戏。$", "$1 detected. U3DViewer can prepare the runtime and restart this game automatically.");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^进程扫描失败：(.+)$", "Process scan failed: $1");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^操作失败：(.+)$", "Operation failed: $1");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^快照 #(\d+) · (\d+) 个场景$", "Snapshot #$1 · $2 scene(s)");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^场景：(.+)  \[build (-?\d+)\]$", "Scene: $1  [build $2]");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^(.+)（未激活）$", "$1 (inactive)");
         if (result != input) return result;
-
         result = Regex.Replace(input, @"^速度 ([0-9.]+) 单位/秒$", "Speed $1 u/s");
         if (result != input) return result;
 
@@ -346,8 +331,9 @@ internal static class Localization
         result = ReplacePrefix(result, "本地缩放：      ", "Local Scale:    ");
         result = Regex.Replace(result, @"^组件（(\d+)）$", "Components ($1)");
 
-        result = result
+        return result
             .Replace("性能 · 渲染 CPU ", "Perf · Render CPU ", StringComparison.Ordinal)
+            .Replace("性能 · 渲染 ", "Perf · Render ", StringComparison.Ordinal)
             .Replace("（平均 ", "(avg ", StringComparison.Ordinal)
             .Replace("，最大 ", ", max ", StringComparison.Ordinal)
             .Replace("）· 层级 ", ") · Hierarchy ", StringComparison.Ordinal)
@@ -356,8 +342,6 @@ internal static class Localization
             .Replace("右键 + 鼠标观察 · 右键 + WASD/QE 飞行 · Shift 加速 · 滚轮调速 · F 聚焦", "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus", StringComparison.Ordinal)
             .Replace("游戏 GPU：", "Game GPU:", StringComparison.Ordinal)
             .Replace("Viewer GPU：", "Viewer GPU:", StringComparison.Ordinal);
-
-        return result;
     }
 
     private static string ReplacePrefix(string input, string from, string to) =>
@@ -398,8 +382,4 @@ internal static class Localization
         (!string.IsNullOrWhiteSpace(language) && language.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
             ? ChineseSimplified
             : English;
-
-    private sealed class LocalizationMarker
-    {
-    }
 }
