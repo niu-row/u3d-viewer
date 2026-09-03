@@ -1,22 +1,48 @@
 # Getting started
 
-This bootstrap proves the runtime hierarchy path before adding Avalonia or D3D11 rendering. Mono and IL2CPP use different game-side agents but emit the same protocol to the same standalone viewer.
+The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
 
 ## Requirements
 
 - Windows x64
-- .NET 8 SDK for the standalone viewer
+- .NET 8 SDK for the standalone Viewer
 - .NET 6 SDK for the IL2CPP agent
+- Visual Studio C++ workload + CMake for `U3DViewer.NativeBridge.dll`
 - A Unity game you are authorized to inspect/debug
 - The matching BepInEx 6 runtime for that game
+- The target game must run Direct3D 11 for the current Scene View transport
 
-## Mono setup
+## 1. Build the native D3D11 bridge
+
+From a Visual Studio x64 developer shell:
+
+```powershell
+cmake -S native/U3DViewer.NativeBridge -B build/native -A x64
+cmake --build build/native --config Release
+```
+
+The output is:
+
+```text
+build/native/Release/U3DViewer.NativeBridge.dll
+```
+
+Copy this DLL next to the target game executable:
+
+```text
+<Game>/Game.exe
+<Game>/U3DViewer.NativeBridge.dll
+```
+
+The Viewer also needs the same DLL next to its executable when you run/publish it outside the repository.
+
+## 2. Mono setup
 
 For a Unity Mono game, copy these files from `<GameName>_Data/Managed` into:
 
 `src/U3DViewer.Agent.Mono/lib/`
 
-Required for the current bootstrap:
+Required:
 
 - `UnityEngine.CoreModule.dll`
 - `UnityEngine.SceneManagementModule.dll`
@@ -42,15 +68,15 @@ U3D Viewer Mono agent loaded.
 Waiting for viewer on pipe 'u3d-viewer'...
 ```
 
-## IL2CPP setup
+## 3. IL2CPP setup
 
-BepInEx 6 IL2CPP currently uses the Unity IL2CPP Bleeding Edge distribution. Install the correct Windows x64 IL2CPP build into the game, then launch the game once so BepInEx can generate its interop assemblies.
+Install the matching BepInEx 6 IL2CPP distribution into the game, then launch the game once so BepInEx can generate its interop assemblies.
 
-BepInEx exposes game/Unity IL2CPP proxy assemblies under `BepInEx/interop`. Copy these generated files into:
+Copy the generated Unity proxy assemblies from `BepInEx/interop` into:
 
 `src/U3DViewer.Agent.IL2CPP/lib/`
 
-Required for the current bootstrap:
+Required:
 
 - `UnityEngine.CoreModule.dll`
 - `UnityEngine.SceneManagementModule.dll`
@@ -76,53 +102,81 @@ U3D Viewer IL2CPP agent loaded.
 Waiting for viewer on pipe 'u3d-viewer'...
 ```
 
-The IL2CPP entry point inherits `BepInEx.Unity.IL2CPP.BasePlugin`. It adds an injected `RuntimeBehaviour` through BepInEx so scene access still runs from Unity's main thread.
+## 4. Build and run the standalone Viewer
 
-## Standalone viewer
-
-The viewer is the same for both backends:
+Build:
 
 ```powershell
 dotnet restore src/U3DViewer.Viewer/U3DViewer.Viewer.csproj
+dotnet build src/U3DViewer.Viewer/U3DViewer.Viewer.csproj -c Debug
+```
+
+Copy the native bridge next to the Viewer build output:
+
+```powershell
+Copy-Item build/native/Release/U3DViewer.NativeBridge.dll `
+  src/U3DViewer.Viewer/bin/Debug/net8.0/U3DViewer.NativeBridge.dll
+```
+
+Run:
+
+```powershell
 dotnet run --project src/U3DViewer.Viewer/U3DViewer.Viewer.csproj
 ```
 
-Once connected, the console refreshes with the live loaded scenes and GameObject hierarchy.
+The window contains:
 
-Example:
+- Runtime Hierarchy
+- Runtime Inspector
+- Scene View
+- Reset / Perspective / Orthographic / Focus Selected controls
+- WASD/QE movement and arrow-key look controls when Scene View has focus
 
-```text
-U3D Viewer | snapshot #12 | scenes: 1
-------------------------------------------------------------------------
-▼ Scene: Main  [buildIndex=0, loaded=True]
-  ├─ Main Camera  #1024
-  ├─ Player  #1108
-    ├─ Body  #1110
-    ├─ Weapon  #1120
-  ├─ Environment  #1200
-```
+## 5. Expected live path
 
-## What success means
-
-At this stage success is not a 3D window yet. Success means either backend can complete this path:
+When everything is working:
 
 ```text
-built Unity game
-  -> BepInEx Mono or IL2CPP agent
-  -> Unity SceneManager/GameObject APIs on the main thread
-  -> SceneSnapshot DTO
-  -> named pipe
-  -> standalone Viewer.exe
+Built Unity game
+  -> Mono or IL2CPP Agent
+  -> Scene Camera
+  -> 1280x720 RenderTexture
+  -> NativeBridge writer
+  -> named D3D11 shared Texture2D
+  -> NativeBridge reader in U3DViewer.exe
+  -> staging readback
+  -> Avalonia WriteableBitmap
+  -> live Scene View
 ```
 
-Only after this path is stable should the project add Avalonia and the Scene Camera/D3D11 transport.
+The status strip inside Scene View reports bridge problems such as:
 
-## Known bootstrap limitations
+- target is not using Direct3D 11
+- `U3DViewer.NativeBridge.dll` is missing
+- shared texture could not be opened
+- native API versions do not match
 
-- A full recursive snapshot is captured once per second; large scenes will need incremental updates later.
+## Current controls
+
+Click the Scene View first, then use:
+
+```text
+W / S      forward / backward
+A / D      left / right
+Q / E      down / up
+Arrow keys look around
+```
+
+Use `Focus Selected` after selecting a GameObject in Runtime Hierarchy.
+
+## Current limitations
+
+- Scene target size is fixed at 1280x720.
+- Scene image presentation currently uses a GPU-to-CPU staging readback; direct GPU presentation is a later optimization.
+- Direct3D 12 and Vulkan are not supported by the Scene transport yet.
+- A full recursive hierarchy snapshot is captured once per second; large scenes need incremental updates later.
 - Component values are not inspected yet; only component type names are captured.
-- IL2CPP component names currently use the managed proxy type exposed by Il2CppInterop; richer runtime type metadata can be added later.
+- IL2CPP component names currently use the managed proxy type exposed by Il2CppInterop.
 - `DontDestroyOnLoad`/hidden runtime objects are not specially enumerated yet.
-- No object selection or commands are sent back to the game yet.
-- No 3D Scene View yet.
+- Picking, collider visualization and transform gizmos are not implemented yet.
 - There is no GitHub Actions workflow; build and runtime validation are local/manual.
