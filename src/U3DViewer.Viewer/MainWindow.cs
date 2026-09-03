@@ -31,6 +31,7 @@ internal sealed class MainWindow : Window
     private HierarchyNode? _selectedNode;
     private WriteableBitmap? _sceneBitmap;
     private int _sceneDxgiFormat;
+    private string _sceneGpuStatus = string.Empty;
 
     public MainWindow()
     {
@@ -92,7 +93,7 @@ internal sealed class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 560,
+            MaxWidth = 760,
             Margin = new Thickness(14)
         };
 
@@ -351,7 +352,7 @@ internal sealed class MainWindow : Window
             case ConnectionState.Connecting:
                 _connectionStatus.Text = "● Connecting";
                 _connectionStatus.Foreground = Brushes.Goldenrod;
-                _connectionDetail.Text = "Looking for pipe 'u3d-viewer'";
+                _connectionDetail.Text = "Looking for the selected process Agent pipe";
                 break;
             case ConnectionState.Connected:
                 _connectionStatus.Text = "● Connected";
@@ -363,6 +364,7 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
                 _sceneReader.Reset();
+                _sceneGpuStatus = string.Empty;
                 _sceneStatus.Text = "Waiting for the target game's Scene render target...";
                 break;
         }
@@ -384,15 +386,19 @@ internal sealed class MainWindow : Window
     {
         if (target is null || !target.Available)
         {
+            _sceneGpuStatus = string.Empty;
             _sceneStatus.Text = target?.Status ?? "Agent did not publish Scene render target information.";
             return;
         }
 
         if (!_sceneReader.Open(target))
         {
+            _sceneGpuStatus = string.Empty;
             _sceneStatus.Text = _sceneReader.LastStatus;
             return;
         }
+
+        _sceneGpuStatus = _sceneReader.DescribeGpuPair(target);
 
         if (_sceneBitmap is null ||
             _sceneBitmap.PixelSize.Width != target.Width ||
@@ -416,7 +422,9 @@ internal sealed class MainWindow : Window
             _sceneImage.Source = _sceneBitmap;
         }
 
-        _sceneStatus.Text = $"{target.Width}×{target.Height} · DXGI {target.DxgiFormat} · click Scene View, then use WASD/QE + arrow keys";
+        _sceneStatus.Text =
+            $"{target.Width}×{target.Height} · DXGI {target.DxgiFormat} · click Scene View, then use WASD/QE + arrow keys\n" +
+            _sceneGpuStatus;
     }
 
     private void RefreshSceneFrame()
@@ -439,13 +447,16 @@ internal sealed class MainWindow : Window
                     out var dxgiFormat))
             {
                 _sceneImage.IsVisible = true;
-                _sceneStatus.Text = $"LIVE · {width}×{height} · DXGI {dxgiFormat} · WASD/QE + arrow keys";
+                _sceneStatus.Text =
+                    $"LIVE · {width}×{height} · DXGI {dxgiFormat} · WASD/QE + arrow keys\n" +
+                    _sceneGpuStatus;
                 _sceneImage.InvalidateVisual();
             }
         }
         catch (Exception ex)
         {
-            _sceneStatus.Text = $"Scene frame update failed: {ex.Message}";
+            _sceneStatus.Text = $"Scene frame update failed: {ex.Message}\n{_sceneGpuStatus}";
+            ViewerLog.Error("Scene frame update failed.", ex);
         }
     }
 
