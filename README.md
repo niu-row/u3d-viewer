@@ -10,6 +10,29 @@ The project is split into a game-side runtime agent and a standalone viewer:
 - **U3DViewer.Viewer** is a standalone .NET 8 + Avalonia desktop application.
 - **U3DViewer.NativeBridge** transports the runtime Scene Camera through a named D3D11 shared texture.
 
+## VSCode quick start
+
+The repository includes `.vscode/tasks.json` plus local PowerShell build/deploy scripts.
+
+1. Run `Tasks: Run Task` -> `U3DViewer: Create Local Config` once.
+2. Edit `u3dviewer.local.json` and set `backend` (`Mono` or `IL2CPP`) plus the target game's root `gamePath`.
+3. Press `Ctrl+Shift+B`.
+
+The default VSCode build task performs, in sequence:
+
+```text
+stage target Unity references when needed
+  -> configure/build NativeBridge x64
+  -> build the selected Mono/IL2CPP Agent
+  -> build Viewer
+  -> deploy Agent + Protocol into BepInEx/plugins/U3DViewer
+  -> deploy NativeBridge next to the game executable and Viewer
+```
+
+`u3dviewer.local.json` and local build output are ignored by Git. For IL2CPP, run the target game with BepInEx once before the first build so `BepInEx/interop` exists.
+
+Other VSCode tasks include build-only, deploy-only, and `U3DViewer: Build + Deploy + Run Viewer`.
+
 ## Current milestone
 
 M2 desktop UI and M3 Scene Camera control are implemented. M4 now has an initial end-to-end Scene View transport implementation ready for local runtime validation.
