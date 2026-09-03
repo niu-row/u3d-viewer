@@ -12,7 +12,10 @@ internal sealed record AgentBuildResult(
     string? AgentPath = null,
     string? ProtocolPath = null);
 
-internal sealed record UnityReferenceSet(string CorePath, string ScenePath);
+internal sealed record UnityReferenceSet(
+    string CorePath,
+    string ScenePath,
+    string? Il2CppMscorlibPath = null);
 
 internal static class AgentBuilder
 {
@@ -138,7 +141,37 @@ internal static class AgentBuilder
             return false;
         }
 
-        references = new UnityReferenceSet(corePath, scenePath);
+        string? il2CppMscorlibPath = null;
+        if (backend == "IL2CPP")
+        {
+            var conventionalPath = Path.Combine(referenceDirectory, "Il2Cppmscorlib.dll");
+            if (File.Exists(conventionalPath) && AssemblyHasName(conventionalPath, "Il2Cppmscorlib"))
+            {
+                il2CppMscorlibPath = conventionalPath;
+            }
+            else
+            {
+                try
+                {
+                    il2CppMscorlibPath = Directory
+                        .EnumerateFiles(referenceDirectory, "*.dll", SearchOption.TopDirectoryOnly)
+                        .FirstOrDefault(path => AssemblyHasName(path, "Il2Cppmscorlib"));
+                }
+                catch (Exception ex)
+                {
+                    error = $"Could not locate Il2Cppmscorlib in {referenceDirectory}: {ex.Message}";
+                    return false;
+                }
+            }
+
+            if (il2CppMscorlibPath is null)
+            {
+                error = $"IL2CPP interop generation is not complete yet: Il2Cppmscorlib.dll was not found in {referenceDirectory}.";
+                return false;
+            }
+        }
+
+        references = new UnityReferenceSet(corePath, scenePath, il2CppMscorlibPath);
         return true;
     }
 
@@ -167,6 +200,10 @@ internal static class AgentBuilder
 
         ViewerLog.Info($"Resolved {backend} Unity core reference: {references!.CorePath}");
         ViewerLog.Info($"Resolved {backend} Unity scene reference: {references.ScenePath}");
+        if (!string.IsNullOrWhiteSpace(references.Il2CppMscorlibPath))
+        {
+            ViewerLog.Info($"Resolved IL2CPP mscorlib reference: {references.Il2CppMscorlibPath}");
+        }
 
         string fingerprint;
         try
@@ -244,6 +281,10 @@ internal static class AgentBuilder
         startInfo.ArgumentList.Add("--nologo");
         startInfo.ArgumentList.Add($"-p:UnityCoreReference={references.CorePath}");
         startInfo.ArgumentList.Add($"-p:UnitySceneReference={references.ScenePath}");
+        if (!string.IsNullOrWhiteSpace(references.Il2CppMscorlibPath))
+        {
+            startInfo.ArgumentList.Add($"-p:Il2CppMscorlibReference={references.Il2CppMscorlibPath}");
+        }
 
         ViewerLog.Info($"Starting Agent build: {dotnet} build {projectPath} -c {Configuration}");
         ViewerLog.Info($"Agent build workspace: {workspace}");
@@ -314,6 +355,7 @@ internal static class AgentBuilder
                 $"fingerprint={fingerprint}{Environment.NewLine}" +
                 $"core={references.CorePath}{Environment.NewLine}" +
                 $"scene={references.ScenePath}{Environment.NewLine}" +
+                $"il2cppMscorlib={references.Il2CppMscorlibPath ?? string.Empty}{Environment.NewLine}" +
                 $"builtUtc={DateTime.UtcNow:O}{Environment.NewLine}");
 
             progress?.Report($"Cached {backend} Agent profile {ShortFingerprint(fingerprint)} for future launches.");
@@ -396,6 +438,10 @@ internal static class AgentBuilder
 
         AppendReference(hash, "core", references.CorePath);
         AppendReference(hash, "scene", references.ScenePath);
+        if (!string.IsNullOrWhiteSpace(references.Il2CppMscorlibPath))
+        {
+            AppendReference(hash, "il2cpp-mscorlib", references.Il2CppMscorlibPath);
+        }
 
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
@@ -434,6 +480,33 @@ internal static class AgentBuilder
         }
 
         return false;
+    }
+
+    private static bool AssemblyHasName(string path, string assemblyName)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var peReader = new PEReader(stream);
+            if (!peReader.HasMetadata)
+            {
+                return false;
+            }
+
+            var metadata = peReader.GetMetadataReader();
+            if (!metadata.IsAssembly)
+            {
+                return false;
+            }
+
+            var definition = metadata.GetAssemblyDefinition();
+            return metadata.StringComparer.Equals(definition.Name, assemblyName);
+        }
+        catch
+        {
+            // Interop generation can leave a file visible before it is fully written.
+            return false;
+        }
     }
 
     private static void AddFiles(List<string> files, string directory)
