@@ -7,11 +7,12 @@ endif()
 
 add_library(U3DViewer.NativeBridge SHARED
     src/NativeBridge.cpp
+    src/ScenePresenter.cpp
 )
 
 target_compile_features(U3DViewer.NativeBridge PRIVATE cxx_std_20)
 target_compile_definitions(U3DViewer.NativeBridge PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(U3DViewer.NativeBridge PRIVATE d3d11 dxgi)
+target_link_libraries(U3DViewer.NativeBridge PRIVATE d3d11 d3dcompiler dxgi user32)
 
 set_target_properties(U3DViewer.NativeBridge PROPERTIES
     OUTPUT_NAME "U3DViewer.NativeBridge"
