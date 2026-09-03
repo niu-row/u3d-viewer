@@ -330,6 +330,8 @@ internal sealed class ProcessPickerWindow : Window
             return;
         }
 
+        ViewerLog.BindToGame(selected.ExecutablePath);
+
         if (selected.AgentStatus == AgentProcessStatus.Ready)
         {
             ViewerLog.Info($"Attaching to existing Agent: {selected.ProcessName}, PID {selected.ProcessId}.");
@@ -374,6 +376,7 @@ internal sealed class ProcessPickerWindow : Window
             return;
         }
 
+        ViewerLog.BindToGame(executablePath);
         ViewerLog.Info($"Open Game selected: {executablePath}");
         await RunAutomationAsync(
             (token, progress) => GameAutomation.InstallLaunchAndWaitAsync(executablePath, progress, token));
