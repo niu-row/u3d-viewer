@@ -8,11 +8,11 @@ The project is split into a game-side runtime agent and a standalone viewer:
 - **U3DViewer.Agent.IL2CPP** does the same for Unity IL2CPP games through BepInEx 6 + Il2CppInterop.
 - **U3DViewer.Protocol** contains the runtime-neutral wire messages shared by both agents and the viewer.
 - **U3DViewer.Viewer** is a standalone .NET 8 + Avalonia desktop application.
-- A later **NativeBridge** milestone will transport a Scene Camera render target to the standalone viewer using D3D11 shared resources.
+- **U3DViewer.NativeBridge** transports the runtime Scene Camera through a named D3D11 shared texture.
 
 ## Current milestone
 
-M2 desktop UI is implemented and M3 Scene Camera control is now being wired on top of the M0/M1 runtime hierarchy pipeline.
+M2 desktop UI and M3 Scene Camera control are implemented. M4 now has an initial end-to-end Scene View transport implementation ready for local runtime validation.
 
 Implemented:
 
@@ -23,23 +23,42 @@ Implemented:
 - bidirectional Named Pipe control channel
 - isolated runtime Scene Camera controller in both Mono and IL2CPP agents
 - camera reset, perspective/orthographic switch, focus selected, keyboard move/look commands
-- connection and snapshot status
-- reserved Scene View panel for the upcoming render transport
+- 1280x720 runtime RenderTexture rendered by the target game
+- D3D11 named shared texture transport with keyed-mutex synchronization
+- render-target metadata published through `SceneSnapshot.RenderTarget`
+- Viewer-side opening of the named D3D11 texture
+- first live Scene View presentation path through a staging readback into an Avalonia `WriteableBitmap`
+- connection, snapshot and Scene transport status
 
-The camera currently remains disabled for rendering. M4 will attach a render target and transport it to the standalone Viewer with a D3D11 shared resource.
+The first M4 Viewer path intentionally uses GPU-to-CPU staging readback. It is meant to prove the complete pipeline against real games before replacing the readback with direct GPU presentation.
 
 ## Scope
 
 - Windows x64 first
 - Unity Mono and IL2CPP
 - BepInEx 6
+- Direct3D 11 Scene transport first
 - read-only inspection first
 - Named Pipe for runtime metadata/control
-- D3D11 shared resource planned for Scene View pixels
+- D3D11 shared resource for Scene View pixels
 - standalone Viewer independent from the target game's Unity version
 - no GitHub Actions; validation is local/manual
+
+## Runtime render path
+
+```text
+Built Unity game
+  -> Mono or IL2CPP Agent
+  -> Scene Camera
+  -> RenderTexture
+  -> U3DViewer.NativeBridge.dll
+  -> named D3D11 shared Texture2D
+  -> U3DViewer.Viewer.exe
+  -> Avalonia Scene View
+```
 
 ## Start here
 
 - `docs/getting-started.md` — Mono/IL2CPP build and first runtime test
 - `docs/architecture.md` — target architecture and milestones
+- `native/U3DViewer.NativeBridge/README.md` — native bridge build/deployment and M4 limitations
