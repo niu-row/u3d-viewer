@@ -17,6 +17,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static PipeServer? _pipeServer;
     private static ManualLogSource? _log;
     private static SceneCameraController? _sceneCamera;
+    private static SceneCullingController? _sceneCulling;
     private static SceneScanner.SceneScanSession? _sceneScan;
     private static Task<SerializedSnapshot>? _snapshotSerialization;
     private static readonly HashSet<int> ExpandedInstanceIds = new();
@@ -49,6 +50,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _pipeServer = pipeServer;
         _log = log;
         _sceneCamera = new SceneCameraController();
+        _sceneCulling = new SceneCullingController();
         _sceneScan = null;
         _snapshotSerialization = null;
         ExpandedInstanceIds.Clear();
@@ -64,6 +66,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     {
         RestoreBackgroundExecution();
         ResetSnapshotState();
+        _sceneCulling = null;
         _pipeServer = null;
         _log = null;
     }
@@ -110,6 +113,14 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                         continue;
                     default:
                         _sceneCamera?.Apply(command);
+                        if (command.Kind == ViewerCommandKind.CameraCullingMask)
+                        {
+                            _sceneCulling?.Apply(command);
+                        }
+                        else if (command.Kind == ViewerCommandKind.CameraReset)
+                        {
+                            _sceneCulling?.Reapply();
+                        }
                         break;
                 }
             }
@@ -175,7 +186,9 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             RecordHierarchyScan(_currentScanNodes, _currentScanMs);
 
             var snapshot = _sceneScan.Snapshot;
-            snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
+            var renderTarget = _sceneCamera?.GetRenderTargetInfo();
+            _sceneCulling?.Populate(renderTarget);
+            snapshot.RenderTarget = renderTarget;
             snapshot.Performance = BuildPerformanceInfo();
             _sceneCamera?.PopulatePerformance(snapshot.Performance);
             _sceneScan = null;
@@ -203,6 +216,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         ResetSnapshotState();
         ExpandedInstanceIds.Clear();
         _interactiveHierarchyRefresh = false;
+        _sceneCulling = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
     }
