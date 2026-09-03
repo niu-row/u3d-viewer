@@ -23,6 +23,24 @@ namespace
     constexpr wchar_t kSceneHostClass[] = L"U3DViewer.SceneHost";
     constexpr UINT kSceneHostStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
 
+    enum class PresenterInitStage : int
+    {
+        None = 0,
+        FindAdapter = 1,
+        CreateDevice = 2,
+        QueryDevice1 = 3,
+        OpenSharedResource = 4,
+        QueryKeyedMutex = 5,
+        CreateShaderResourceView = 6,
+        CreateShaders = 7,
+        QueryDxgiDevice = 8,
+        GetAdapter = 9,
+        GetFactory = 10,
+        CreateSwapChain = 11,
+        CreateRenderTarget = 12,
+        Ready = 13
+    };
+
     struct SceneInputState
     {
         int RightMouse;
@@ -55,6 +73,8 @@ namespace
         UINT SourceHeight = 0;
         LUID AdapterLuid{};
         std::wstring AdapterName;
+        PresenterInitStage InitStage = PresenterInitStage::None;
+        bool LegacySwapChain = false;
     };
 
     struct HostState
@@ -62,6 +82,7 @@ namespace
         std::mutex Mutex;
         Presenter* ScenePresenter = nullptr;
         HRESULT LastError = S_OK;
+        PresenterInitStage LastInitStage = PresenterInitStage::None;
         LUID PresenterAdapterLuid{};
         std::wstring PresenterAdapterName;
 
@@ -92,6 +113,25 @@ namespace
     bool SameLuid(const LUID& left, const LUID& right)
     {
         return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
+    }
+
+    DXGI_FORMAT ResolveShaderResourceFormat(DXGI_FORMAT format)
+    {
+        switch (format)
+        {
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+                return DXGI_FORMAT_B8G8R8A8_UNORM;
+            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+                return DXGI_FORMAT_B8G8R8X8_UNORM;
+            case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+                return DXGI_FORMAT_R10G10B10A2_UNORM;
+            case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            default:
+                return format;
+        }
     }
 
     HostState* GetHostState(HWND window)
@@ -466,10 +506,70 @@ float4 main(PSIn input) : SV_TARGET
         return viewport;
     }
 
+    HRESULT CreatePresenterSwapChain(Presenter& presenter, IDXGIFactory2* factory, HWND window, UINT width, UINT height)
+    {
+        DXGI_SWAP_CHAIN_DESC1 swapDesc{};
+        swapDesc.Width = width;
+        swapDesc.Height = height;
+        swapDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        swapDesc.SampleDesc.Count = 1;
+        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        swapDesc.BufferCount = 2;
+        swapDesc.Scaling = DXGI_SCALING_STRETCH;
+        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        swapDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+
+        HRESULT hr = factory->CreateSwapChainForHwnd(
+            presenter.Device.Get(),
+            window,
+            &swapDesc,
+            nullptr,
+            nullptr,
+            &presenter.SwapChain);
+        if (SUCCEEDED(hr))
+        {
+            presenter.LegacySwapChain = false;
+            return S_OK;
+        }
+
+        if (hr != E_INVALIDARG)
+        {
+            return hr;
+        }
+
+        DXGI_SWAP_CHAIN_DESC legacyDesc{};
+        legacyDesc.BufferDesc.Width = width;
+        legacyDesc.BufferDesc.Height = height;
+        legacyDesc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        legacyDesc.SampleDesc.Count = 1;
+        legacyDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        legacyDesc.BufferCount = 1;
+        legacyDesc.OutputWindow = window;
+        legacyDesc.Windowed = TRUE;
+        legacyDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+        ComPtr<IDXGISwapChain> legacySwapChain;
+        hr = factory->CreateSwapChain(presenter.Device.Get(), &legacyDesc, &legacySwapChain);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+
+        hr = legacySwapChain.As(&presenter.SwapChain);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+
+        presenter.LegacySwapChain = true;
+        return S_OK;
+    }
+
     HRESULT InitializePresenter(Presenter& presenter, HWND window, const wchar_t* sharedName, std::uint64_t adapterLuid)
     {
         presenter.Window = window;
 
+        presenter.InitStage = PresenterInitStage::FindAdapter;
         ComPtr<IDXGIAdapter1> adapter;
         HRESULT hr = FindAdapter(adapterLuid, adapter);
         if (FAILED(hr))
@@ -484,6 +584,7 @@ float4 main(PSIn input) : SV_TARGET
             presenter.AdapterName = adapterDesc.Description;
         }
 
+        presenter.InitStage = PresenterInitStage::CreateDevice;
         D3D_FEATURE_LEVEL featureLevel{};
         hr = D3D11CreateDevice(
             adapter.Get(),
@@ -501,6 +602,7 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::QueryDevice1;
         ComPtr<ID3D11Device1> device1;
         hr = presenter.Device.As(&device1);
         if (FAILED(hr))
@@ -508,6 +610,7 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::OpenSharedResource;
         hr = device1->OpenSharedResourceByName(
             sharedName,
             DXGI_SHARED_RESOURCE_READ,
@@ -522,24 +625,36 @@ float4 main(PSIn input) : SV_TARGET
         presenter.SourceWidth = sourceDesc.Width;
         presenter.SourceHeight = sourceDesc.Height;
 
+        presenter.InitStage = PresenterInitStage::QueryKeyedMutex;
         hr = presenter.SharedTexture.As(&presenter.SharedMutex);
         if (FAILED(hr))
         {
             return hr;
         }
 
-        hr = presenter.Device->CreateShaderResourceView(presenter.SharedTexture.Get(), nullptr, &presenter.SharedView);
+        presenter.InitStage = PresenterInitStage::CreateShaderResourceView;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sharedViewDesc{};
+        sharedViewDesc.Format = ResolveShaderResourceFormat(sourceDesc.Format);
+        sharedViewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sharedViewDesc.Texture2D.MostDetailedMip = 0;
+        sharedViewDesc.Texture2D.MipLevels = 1;
+        hr = presenter.Device->CreateShaderResourceView(
+            presenter.SharedTexture.Get(),
+            &sharedViewDesc,
+            &presenter.SharedView);
         if (FAILED(hr))
         {
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::CreateShaders;
         hr = CreateShaders(presenter);
         if (FAILED(hr))
         {
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::QueryDxgiDevice;
         ComPtr<IDXGIDevice> dxgiDevice;
         hr = presenter.Device.As(&dxgiDevice);
         if (FAILED(hr))
@@ -547,6 +662,7 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::GetAdapter;
         ComPtr<IDXGIAdapter> dxgiAdapter;
         hr = dxgiDevice->GetAdapter(&dxgiAdapter);
         if (FAILED(hr))
@@ -554,6 +670,7 @@ float4 main(PSIn input) : SV_TARGET
             return hr;
         }
 
+        presenter.InitStage = PresenterInitStage::GetFactory;
         ComPtr<IDXGIFactory2> factory;
         hr = dxgiAdapter->GetParent(IID_PPV_ARGS(&factory));
         if (FAILED(hr))
@@ -566,30 +683,22 @@ float4 main(PSIn input) : SV_TARGET
         const UINT width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
         const UINT height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
 
-        DXGI_SWAP_CHAIN_DESC1 swapDesc{};
-        swapDesc.Width = width;
-        swapDesc.Height = height;
-        swapDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        swapDesc.SampleDesc.Count = 1;
-        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.BufferCount = 2;
-        swapDesc.Scaling = DXGI_SCALING_STRETCH;
-        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        swapDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-
-        hr = factory->CreateSwapChainForHwnd(
-            presenter.Device.Get(),
-            window,
-            &swapDesc,
-            nullptr,
-            nullptr,
-            &presenter.SwapChain);
+        presenter.InitStage = PresenterInitStage::CreateSwapChain;
+        hr = CreatePresenterSwapChain(presenter, factory.Get(), window, width, height);
         if (FAILED(hr))
         {
             return hr;
         }
 
-        return CreateRenderTarget(presenter, width, height);
+        presenter.InitStage = PresenterInitStage::CreateRenderTarget;
+        hr = CreateRenderTarget(presenter, width, height);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+
+        presenter.InitStage = PresenterInitStage::Ready;
+        return S_OK;
     }
 
     HRESULT PresentScene(Presenter& presenter)
@@ -655,7 +764,8 @@ float4 main(PSIn input) : SV_TARGET
             return releaseHr;
         }
 
-        hr = presenter.SwapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+        const UINT presentFlags = presenter.LegacySwapChain ? 0u : DXGI_PRESENT_DO_NOT_WAIT;
+        hr = presenter.SwapChain->Present(0, presentFlags);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
         {
             return S_FALSE;
@@ -748,6 +858,7 @@ U3DVIEWER_EXPORT int U3DViewer_OpenScenePresenter(HWND window, const wchar_t* sh
     state->ScenePresenter = nullptr;
     state->PresenterAdapterLuid = {};
     state->PresenterAdapterName.clear();
+    state->LastInitStage = PresenterInitStage::None;
 
     auto* presenter = new (std::nothrow) Presenter();
     if (presenter == nullptr)
@@ -759,6 +870,7 @@ U3DVIEWER_EXPORT int U3DViewer_OpenScenePresenter(HWND window, const wchar_t* sh
     const HRESULT hr = InitializePresenter(*presenter, window, sharedName, static_cast<std::uint64_t>(adapterLuid));
     state->PresenterAdapterLuid = presenter->AdapterLuid;
     state->PresenterAdapterName = presenter->AdapterName;
+    state->LastInitStage = presenter->InitStage;
     state->LastError = hr;
     if (FAILED(hr))
     {
@@ -838,6 +950,12 @@ U3DVIEWER_EXPORT int U3DViewer_GetScenePresenterLastError(HWND window)
 {
     HostState* state = window == nullptr ? nullptr : GetHostState(window);
     return state == nullptr ? static_cast<int>(E_POINTER) : static_cast<int>(state->LastError);
+}
+
+U3DVIEWER_EXPORT int U3DViewer_GetScenePresenterInitStage(HWND window)
+{
+    HostState* state = window == nullptr ? nullptr : GetHostState(window);
+    return state == nullptr ? static_cast<int>(PresenterInitStage::None) : static_cast<int>(state->LastInitStage);
 }
 
 U3DVIEWER_EXPORT unsigned long long U3DViewer_GetScenePresenterAdapterLuid(HWND window)
