@@ -4,9 +4,6 @@
     <AssemblyName>U3DViewer.Agent.Mono</AssemblyName>
     <RootNamespace>U3DViewer.Agent.Mono</RootNamespace>
     <Version>0.1.0</Version>
-    <UnityReferenceDir Condition="'$(UnityReferenceDir)' == ''">$(MSBuildProjectDirectory)\lib</UnityReferenceDir>
-    <UnityCoreReference Condition="'$(UnityCoreReference)' == ''">$(UnityReferenceDir)\UnityEngine.CoreModule.dll</UnityCoreReference>
-    <UnitySceneReference Condition="'$(UnitySceneReference)' == ''">$(UnityReferenceDir)\UnityEngine.SceneManagementModule.dll</UnitySceneReference>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,15 +12,11 @@
     <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Reference Include="UnityEngine.Core">
-      <HintPath>$(UnityCoreReference)</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.Scene"
-               Condition="'$(UnitySceneReference)' != '$(UnityCoreReference)'">
-      <HintPath>$(UnitySceneReference)</HintPath>
-      <Private>false</Private>
-    </Reference>
-  </ItemGroup>
+  <!--
+    BepInEx.Unity.Mono intentionally compiles against the UnityEngine facade package.
+    Do not add target UnityEngine.CoreModule/SceneManagementModule references here:
+    modular Unity players can expose the same public types through both the facade and
+    concrete modules, which causes CS0433 duplicate-type errors. The target assemblies
+    are still inspected and fingerprinted by AgentBuilder for compatibility/cache use.
+  -->
 </Project>
