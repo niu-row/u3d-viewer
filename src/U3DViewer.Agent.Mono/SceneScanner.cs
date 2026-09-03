@@ -9,44 +9,147 @@ namespace U3DViewer.Agent.Mono;
 
 internal static class SceneScanner
 {
+    private const string ViewerCameraObjectName = "__U3DViewerCamera";
     private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     public static SceneScanSession Begin(long sequence, int selectedInstanceId, HashSet<int> expandedInstanceIds)
     {
-        var scenes = new SceneInfo[SceneManager.sceneCount];
+        var sceneInfos = new List<SceneInfo>();
         var pending = new Queue<SceneScanWorkItem>();
+        var foundUsableScene = false;
 
-        for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+        var sceneCount = SceneManager.sceneCount;
+        for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
         {
-            var scene = SceneManager.GetSceneAt(sceneIndex);
-            var roots = scene.GetRootGameObjects();
-            var rootInfos = new GameObjectInfo[roots.Length];
-
-            scenes[sceneIndex] = new SceneInfo
+            try
             {
-                BuildIndex = scene.buildIndex,
-                Name = scene.name ?? string.Empty,
-                IsLoaded = scene.isLoaded,
-                Roots = rootInfos
-            };
+                var scene = SceneManager.GetSceneAt(sceneIndex);
+                var isLoaded = scene.isLoaded;
+                var roots = new GameObject[0];
 
-            for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+                if (isLoaded)
+                {
+                    try
+                    {
+                        roots = scene.GetRootGameObjects();
+                        foundUsableScene = true;
+                    }
+                    catch (ArgumentException)
+                    {
+                        // Unity 5.x can expose a Scene through SceneManager before the
+                        // underlying scene is ready for GetRootGameObjects(). Treat it as
+                        // temporarily unavailable and retry on the next snapshot tick.
+                        isLoaded = false;
+                    }
+                    catch (UnityException)
+                    {
+                        isLoaded = false;
+                    }
+                }
+
+                var rootInfos = new GameObjectInfo[roots.Length];
+                sceneInfos.Add(new SceneInfo
+                {
+                    BuildIndex = scene.buildIndex,
+                    Name = scene.name ?? string.Empty,
+                    IsLoaded = isLoaded,
+                    Roots = rootInfos
+                });
+
+                for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+                {
+                    pending.Enqueue(new SceneScanWorkItem(roots[rootIndex], rootInfos, rootIndex));
+                }
+            }
+            catch (ArgumentException)
             {
-                pending.Enqueue(new SceneScanWorkItem(roots[rootIndex], rootInfos, rootIndex));
+                // SceneManager state can change between sceneCount and GetSceneAt on
+                // legacy players. A later scan will pick up the stable scene list.
+            }
+            catch (UnityException)
+            {
             }
         }
+
+#if LEGACY_MONO
+        if (!foundUsableScene)
+        {
+            AddLegacyRuntimeFallback(sceneInfos, pending);
+        }
+#endif
 
         return new SceneScanSession(
             new SceneSnapshot
             {
                 Sequence = sequence,
                 UnixTimeMs = (long)(DateTime.UtcNow - UnixEpoch).TotalMilliseconds,
-                Scenes = scenes
+                Scenes = sceneInfos.ToArray()
             },
             selectedInstanceId,
             expandedInstanceIds,
             pending);
     }
+
+#if LEGACY_MONO
+    private static void AddLegacyRuntimeFallback(
+        List<SceneInfo> scenes,
+        Queue<SceneScanWorkItem> pending)
+    {
+        var runtimeRoots = new List<GameObject>();
+        try
+        {
+            // Unity 5.x can report its active Scene as not loaded during the phase in
+            // which BepInEx plugins begin receiving Update calls. Fall back to the old
+            // global object enumeration so the Viewer can still produce a first snapshot.
+            var objects = Resources.FindObjectsOfTypeAll(typeof(GameObject));
+            for (var index = 0; index < objects.Length; index++)
+            {
+                var gameObject = objects[index] as GameObject;
+                if (gameObject == null || string.Equals(gameObject.name, ViewerCameraObjectName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var transform = gameObject.transform;
+                    if (transform != null && transform.parent == null)
+                    {
+                        runtimeRoots.Add(gameObject);
+                    }
+                }
+                catch (MissingReferenceException)
+                {
+                }
+                catch (UnityException)
+                {
+                }
+            }
+        }
+        catch (UnityException)
+        {
+        }
+
+        if (runtimeRoots.Count == 0)
+        {
+            return;
+        }
+
+        var rootInfos = new GameObjectInfo[runtimeRoots.Count];
+        scenes.Add(new SceneInfo
+        {
+            BuildIndex = -1,
+            Name = "<legacy runtime>",
+            IsLoaded = true,
+            Roots = rootInfos
+        });
+
+        for (var index = 0; index < runtimeRoots.Count; index++)
+        {
+            pending.Enqueue(new SceneScanWorkItem(runtimeRoots[index], rootInfos, index));
+        }
+    }
+#endif
 
     internal sealed class SceneScanSession
     {
