@@ -45,6 +45,42 @@ namespace
                static_cast<std::uint64_t>(luid.LowPart);
     }
 
+    DXGI_FORMAT ResolveSharedTextureFormat(DXGI_FORMAT sourceFormat)
+    {
+        // Unity RenderTexture can expose a typeless D3D11 resource so Unity may attach
+        // either linear or sRGB views. Cross-device sharing is more portable when the
+        // transport resource itself uses one of the typed formats guaranteed shareable
+        // by D3D11.1. CopyResource permits copies within the same typeless format group.
+        switch (sourceFormat)
+        {
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8A8_UNORM;
+
+            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8X8_UNORM:
+            case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8X8_UNORM;
+
+            case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                return DXGI_FORMAT_R10G10B10A2_UNORM;
+
+            case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+            default:
+                return sourceFormat;
+        }
+    }
+
     HRESULT GetAdapterInfo(ID3D11Device* device, LUID& luid, std::wstring& name)
     {
         if (device == nullptr)
@@ -157,9 +193,10 @@ namespace
         }
 
         D3D11_TEXTURE2D_DESC sharedDesc = sourceDesc;
+        sharedDesc.Format = ResolveSharedTextureFormat(sourceDesc.Format);
         sharedDesc.Usage = D3D11_USAGE_DEFAULT;
         sharedDesc.CPUAccessFlags = 0;
-        sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
         sharedDesc.MipLevels = 1;
         sharedDesc.ArraySize = 1;
