@@ -1,5 +1,7 @@
 # u3d-viewer
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Standalone runtime inspection for already-built Unity games.
 
 ## User flow
@@ -31,6 +33,12 @@ U3DViewer then automatically:
 ```
 
 A running game selected through `Prepare + Restart` is only asked to close normally; U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process launched by U3DViewer itself may be terminated after interop generation completes.
+
+## Languages
+
+The Viewer currently supports English and Simplified Chinese. The first launch follows the operating-system UI language (`zh-*` selects Simplified Chinese; other languages fall back to English), and the language can be changed from the selector at the top of the Viewer. The selection is persisted under `%LOCALAPPDATA%/U3DViewer/language.txt`.
+
+Diagnostic logs, build output, exception messages, Unity type names, and third-party runtime messages remain in their original technical form so errors remain searchable.
 
 ## Diagnostics
 
@@ -69,7 +77,7 @@ This means:
 - a Unity/interop update automatically produces a new cache key;
 - changing U3DViewer Agent or Protocol source automatically invalidates the old cache.
 
-This is compatibility-based reuse rather than blindly loading one binary across every Unity version. A broader truly version-agnostic Mono Agent can be pursued later by moving more Unity API access behind runtime compatibility/reflection adapters.
+This is compatibility-based reuse rather than blindly loading one binary across every Unity version.
 
 ## Build in VSCode
 
@@ -89,7 +97,7 @@ src/U3DViewer.Viewer/bin/Release/net8.0/agent-builder/...
 
 No target game path is needed during this build.
 
-The Viewer-side Agent Builder copies its bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/` only when a compatibility profile has no cache entry. Mono references come from `<Game>_Data/Managed`; IL2CPP references come from `BepInEx/interop` after BepInEx generates them.
+The Viewer-side Agent Builder copies its bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/` only when a compatibility profile has no cache entry. Mono uses the BepInEx Unity facade plus target compatibility inputs; IL2CPP references come from `BepInEx/interop` after BepInEx generates the required proxy assemblies.
 
 A local .NET SDK is therefore required for the first build of a new compatibility profile. Cache hits do not invoke `dotnet build`.
 
@@ -106,10 +114,10 @@ Unity Game.exe
         └─ D3D11 named shared Texture2D + keyed mutex
                 ▼
 U3DViewer.Viewer.exe
-├─ process picker
+├─ process picker / Open Game
 ├─ automatic runtime preparation
 ├─ compatibility Agent cache
-├─ Runtime Hierarchy
+├─ lazy Runtime Hierarchy
 ├─ Runtime Inspector
 └─ Scene View
    └─ Avalonia NativeControlHost
@@ -119,6 +127,8 @@ U3DViewer.Viewer.exe
 ```
 
 The active Scene presentation path does not perform GPU-to-CPU staging readback. The Viewer opens the named shared texture on the same DXGI adapter LUID, samples it in a small D3D11 shader, performs the Unity RenderTexture Y flip on the GPU, and presents directly into the embedded HWND swap chain.
+
+Hierarchy discovery is lazy: scene roots are loaded first and child branches are scanned only when expanded. Unity API work remains on the Unity main thread and is spread across frames with a small per-frame budget. Snapshot JSON serialization runs off the Unity main thread.
 
 ## Scene View controls
 
@@ -134,7 +144,31 @@ Mouse wheel     adjust fly speed
 F               focus selected GameObject
 ```
 
-The Scene Camera renders at about 30 FPS while idle and temporarily boosts toward 60 FPS while move/look commands are active. This keeps navigation responsive without continuously doubling the extra Camera.Render workload.
+The current fly speed is shown in the Scene toolbar and updates immediately when the mouse wheel changes it.
+
+Scene stream settings are configurable from the Viewer:
+
+```text
+Idle FPS        1-120   (default 15)
+Active FPS      1-120   (default 30)
+Width           64-4096 (default 1280)
+Height          64-4096 (default 720)
+```
+
+Changing resolution recreates the Unity RenderTexture and D3D11 shared texture. Idle and active frame rates let the user trade Scene responsiveness against the extra `Camera.Render()` workload imposed on the target game.
+
+The Scene lens is also adjustable: FOV, near/far clipping planes and orthographic size are exposed in the Viewer, with Perspective/Orthographic switching independent of the game camera projection.
+
+## Performance metrics
+
+The Scene footer reports lightweight runtime metrics so optimization can be based on measurements rather than guesses:
+
+- Scene `Camera.Render()` CPU-side submission time: last / average / maximum;
+- lazy Hierarchy nodes scanned and scan time: last / average / maximum;
+- snapshot JSON serialization time;
+- snapshot UTF-8 payload size.
+
+The Scene render metric is CPU-side timing around `Camera.Render()` and the native copy event submission; it is not a GPU timestamp query.
 
 ## Current capabilities
 
@@ -145,13 +179,18 @@ The Scene Camera renders at about 30 FPS while idle and temporarily boosts towar
 - automatic BepInEx 6 x64 bootstrap when absent
 - automatic target-compatible Agent build and deployment
 - compatibility-keyed Agent reuse/cache
-- live Runtime Hierarchy
+- lazy live Runtime Hierarchy
 - read-only Runtime Inspector
 - Unity-style Scene fly camera controls
+- adjustable Perspective/Orthographic Scene lens
+- adjustable Scene FPS and render-target resolution
+- visible fly-camera speed
+- runtime performance metrics
 - D3D11 Scene View transport through a named shared texture
 - game/Viewer DXGI adapter LUID diagnostics
 - GPU-native Viewer Scene presentation with no CPU readback
 - GPU-side Y flip and aspect-preserving presentation
+- English / Simplified Chinese Viewer UI
 
 ## Current limitations
 
@@ -159,8 +198,8 @@ The Scene Camera renders at about 30 FPS while idle and temporarily boosts towar
 - Scene transport currently requires Direct3D 11
 - a new, uncached compatibility profile currently requires a local .NET SDK for Agent compilation
 - unusual/custom Unity launchers can require additional process discovery handling
-- Scene Camera source render target is currently fixed at 1280x720
-- the game still performs an extra Scene Camera render for the inspector view; interactive rendering boosts toward 60 FPS and idle rendering falls back to about 30 FPS
+- the game still performs an extra Scene Camera render for the inspector view; use the adjustable FPS/resolution controls to balance load
+- Hierarchy/Inspector control data currently uses JSON over the named pipe; GPU Scene pixels remain on the D3D11 shared-texture path
 - picking, collider visualization and transform gizmos are not implemented yet
 - no GitHub Actions; validation is local/manual
 
