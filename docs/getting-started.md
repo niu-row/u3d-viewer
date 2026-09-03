@@ -1,6 +1,6 @@
 # Getting started
 
-The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, a startup Unity process picker, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
+The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, a startup Unity process picker, GUI install/launch automation, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
 
 ## Requirements
 
@@ -11,6 +11,8 @@ The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia st
 - A Unity game you are authorized to inspect/debug
 - The matching BepInEx 6 runtime for that game
 - The target game must run Direct3D 11 for the current Scene View transport
+
+BepInEx must already be installed in a target game before the Viewer can use `Install + Restart` or `Open Game...`. U3DViewer does not currently install BepInEx automatically because the correct runtime distribution depends on the target backend/game.
 
 ## 1. Build the native D3D11 bridge
 
@@ -27,14 +29,7 @@ The output is:
 build/native/Release/U3DViewer.NativeBridge.dll
 ```
 
-Copy this DLL next to the target game executable:
-
-```text
-<Game>/Game.exe
-<Game>/U3DViewer.NativeBridge.dll
-```
-
-The Viewer also needs the same DLL next to its executable when you run/publish it outside the repository.
+The Viewer build copies this DLL next to `U3DViewer.Viewer.exe` when it exists under `build/native/<Configuration>`.
 
 ## 2. Mono setup
 
@@ -53,15 +48,16 @@ Build:
 
 ```powershell
 dotnet restore src/U3DViewer.Agent.Mono/U3DViewer.Agent.Mono.csproj
-dotnet build src/U3DViewer.Agent.Mono/U3DViewer.Agent.Mono.csproj -c Debug
+dotnet build src/U3DViewer.Agent.Mono/U3DViewer.Agent.Mono.csproj -c Release
 ```
 
-Install these outputs into the game's `BepInEx/plugins/U3DViewer/` directory:
+When the Viewer is built after this Agent, the Agent DLL is bundled into:
 
-- `U3DViewer.Agent.Mono.dll`
-- `U3DViewer.Protocol.dll`
+```text
+U3DViewer.Viewer/bin/Release/net8.0/payload/Mono/U3DViewer.Agent.Mono.dll
+```
 
-The log should contain a PID-specific pipe, for example:
+The runtime log should contain a PID-specific pipe, for example:
 
 ```text
 U3D Viewer Mono agent loaded. Pipe: u3d-viewer-12345
@@ -87,15 +83,16 @@ Build:
 
 ```powershell
 dotnet restore src/U3DViewer.Agent.IL2CPP/U3DViewer.Agent.IL2CPP.csproj
-dotnet build src/U3DViewer.Agent.IL2CPP/U3DViewer.Agent.IL2CPP.csproj -c Debug
+dotnet build src/U3DViewer.Agent.IL2CPP/U3DViewer.Agent.IL2CPP.csproj -c Release
 ```
 
-Install these outputs into the game's `BepInEx/plugins/U3DViewer/` directory:
+When the Viewer is built after this Agent, the Agent DLL is bundled into:
 
-- `U3DViewer.Agent.IL2CPP.dll`
-- `U3DViewer.Protocol.dll`
+```text
+U3DViewer.Viewer/bin/Release/net8.0/payload/IL2CPP/U3DViewer.Agent.IL2CPP.dll
+```
 
-The log should contain a PID-specific pipe, for example:
+The runtime log should contain a PID-specific pipe, for example:
 
 ```text
 U3D Viewer IL2CPP agent loaded. Pipe: u3d-viewer-12345
@@ -104,34 +101,51 @@ Waiting for viewer on pipe 'u3d-viewer-12345'...
 
 ## 4. Build and run the standalone Viewer
 
-Build:
+Build the selected Agent first, then build the Viewer:
 
 ```powershell
-dotnet restore src/U3DViewer.Viewer/U3DViewer.Viewer.csproj
-dotnet build src/U3DViewer.Viewer/U3DViewer.Viewer.csproj -c Debug
+dotnet build src/U3DViewer.Viewer/U3DViewer.Viewer.csproj -c Release
 ```
 
-Copy the native bridge next to the Viewer build output:
-
-```powershell
-Copy-Item build/native/Release/U3DViewer.NativeBridge.dll `
-  src/U3DViewer.Viewer/bin/Debug/net8.0/U3DViewer.NativeBridge.dll
-```
+With the repository VSCode workflow, `Ctrl+Shift+B` already performs the correct build order.
 
 Run:
 
 ```powershell
-dotnet run --project src/U3DViewer.Viewer/U3DViewer.Viewer.csproj
+.\src\U3DViewer.Viewer\bin\Release\net8.0\U3DViewer.Viewer.exe
 ```
 
-The first window is a Unity process picker. It lists detected Unity standalone processes with:
+The first window is a Unity process picker. It lists detected Unity standalone processes with process name/PID, backend, Agent state, and executable path.
 
-- process name and PID
-- Mono / IL2CPP / Unknown backend
-- Agent state: Ready, Busy, or Not detected
-- executable path
+### Ready process
 
-Select a `Ready` process and click `Connect`. The main Viewer then opens against only that process's `u3d-viewer-<PID>` pipe.
+Select a process with `Agent = Ready` and click `Attach`. The main Viewer opens against only that process's `u3d-viewer-<PID>` pipe.
+
+### Running process without Agent
+
+If a process is detected as Unity and its Agent is `Not detected`, and the matching bundled payload plus BepInEx are available, the action changes to `Install + Restart`.
+
+The Viewer performs:
+
+```text
+copy Agent -> BepInEx/plugins/U3DViewer
+copy U3DViewer.Protocol.dll -> BepInEx/plugins/U3DViewer
+copy U3DViewer.NativeBridge.dll -> game directory
+request graceful game close
+relaunch the selected executable
+wait for the new u3d-viewer-<PID> pipe
+open the main Viewer automatically
+```
+
+The Viewer does not force-kill a process that refuses to close. In that case the deployment remains installed and the UI asks you to close/relaunch the game manually.
+
+### Launch a game from the Viewer
+
+Click `Open Game...`, select a Unity `.exe`, and U3DViewer will detect Mono/IL2CPP, deploy the matching bundled Agent, start the executable, wait up to 30 seconds for the PID-specific Agent pipe, and open the main Viewer automatically.
+
+This is launch/install automation, not generic remote DLL injection into an arbitrary running process.
+
+## 5. Main Viewer
 
 The main window contains:
 
@@ -140,8 +154,6 @@ The main window contains:
 - Scene View
 - Reset / Perspective / Orthographic / Focus Selected controls
 - WASD/QE movement and arrow-key look controls when Scene View has focus
-
-## 5. Expected live path
 
 When everything is working:
 
@@ -181,6 +193,8 @@ Use `Focus Selected` after selecting a GameObject in Runtime Hierarchy.
 
 ## Current limitations
 
+- GUI automation requires a matching BepInEx 6 runtime to already exist in the game directory.
+- `Open Game...` launches the selected executable directly and does not preserve launcher-specific command-line arguments.
 - Unity process detection currently targets Windows standalone player layouts and can miss unusual/custom launch layouts.
 - Scene target size is fixed at 1280x720.
 - Scene image presentation currently uses a GPU-to-CPU staging readback; direct GPU presentation is a later optimization.
