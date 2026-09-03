@@ -5,6 +5,8 @@
     <RootNamespace>U3DViewer.Agent.Mono</RootNamespace>
     <Version>0.1.0</Version>
     <UnityReferenceDir Condition="'$(UnityReferenceDir)' == ''">$(MSBuildProjectDirectory)\lib</UnityReferenceDir>
+    <UnityCoreReference Condition="'$(UnityCoreReference)' == ''">$(UnityReferenceDir)\UnityEngine.CoreModule.dll</UnityCoreReference>
+    <UnitySceneReference Condition="'$(UnitySceneReference)' == ''">$(UnityReferenceDir)\UnityEngine.SceneManagementModule.dll</UnitySceneReference>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,12 +16,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(UnityReferenceDir)\UnityEngine.CoreModule.dll</HintPath>
+    <Reference Include="UnityEngine.Core">
+      <HintPath>$(UnityCoreReference)</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="UnityEngine.SceneManagementModule">
-      <HintPath>$(UnityReferenceDir)\UnityEngine.SceneManagementModule.dll</HintPath>
+    <Reference Include="UnityEngine.Scene"
+               Condition="'$(UnitySceneReference)' != '$(UnityCoreReference)'">
+      <HintPath>$(UnitySceneReference)</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
