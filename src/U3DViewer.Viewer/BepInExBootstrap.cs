@@ -111,9 +111,6 @@ internal static class BepInExBootstrap
             return new BepInExBootstrapResult(false, "Game directory could not be resolved.");
         }
 
-        var interopDirectory = Path.Combine(gameDirectory, "BepInEx", "interop");
-        var generationMarker = Path.Combine(interopDirectory, "assembly-hash.txt");
-
         progress?.Report("Starting the game once so BepInEx can generate IL2CPP interop assemblies...");
 
         Process? process;
@@ -139,37 +136,29 @@ internal static class BepInExBootstrap
         using (process)
         {
             var deadline = DateTime.UtcNow + InteropTimeout;
+            string resolutionError = "Required IL2CPP interop assemblies are not available yet.";
+
             while (DateTime.UtcNow < deadline)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (AgentBuilder.TryResolveUnityReferences(executablePath, "IL2CPP", out _, out _))
+                if (AgentBuilder.TryResolveUnityReferences(
+                        executablePath,
+                        "IL2CPP",
+                        out _,
+                        out resolutionError))
                 {
                     progress?.Report("IL2CPP interop assemblies generated. Restarting into U3DViewer mode...");
                     await StopBootstrapProcessAsync(process, cancellationToken);
                     return new BepInExBootstrapResult(true, "IL2CPP interop assemblies generated.");
                 }
 
-                if (File.Exists(generationMarker))
-                {
-                    AgentBuilder.TryResolveUnityReferences(
-                        executablePath,
-                        "IL2CPP",
-                        out _,
-                        out var resolutionError);
-
-                    await StopBootstrapProcessAsync(process, cancellationToken);
-                    return new BepInExBootstrapResult(
-                        false,
-                        "BepInEx finished IL2CPP interop generation, but U3DViewer could not resolve the required Unity runtime types. " +
-                        resolutionError);
-                }
-
                 if (process.HasExited)
                 {
                     return new BepInExBootstrapResult(
                         false,
-                        $"Game exited before IL2CPP interop generation completed (exit code {process.ExitCode}). Check BepInEx/LogOutput.log.");
+                        $"Game exited before IL2CPP interop generation completed (exit code {process.ExitCode}). " +
+                        $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log.");
                 }
 
                 await Task.Delay(500, cancellationToken);
@@ -178,7 +167,8 @@ internal static class BepInExBootstrap
             await StopBootstrapProcessAsync(process, cancellationToken);
             return new BepInExBootstrapResult(
                 false,
-                "BepInEx did not finish IL2CPP interop generation within 2 minutes. Check BepInEx/LogOutput.log.");
+                "BepInEx did not finish IL2CPP interop generation within 2 minutes. " +
+                $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log.");
         }
     }
 
