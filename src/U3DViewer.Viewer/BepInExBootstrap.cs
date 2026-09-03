@@ -182,20 +182,21 @@ internal static class BepInExBootstrap
 
         try
         {
-            progress?.Report("Applying low-overhead BepInEx logging profile...");
+            progress?.Report("Applying low-overhead BepInEx logging profile with diagnostic console...");
             var configDirectory = Path.Combine(gameDirectory, "BepInEx", "config");
             Directory.CreateDirectory(configDirectory);
             var configPath = Path.Combine(configDirectory, "BepInEx.cfg");
             var config = File.Exists(configPath) ? File.ReadAllText(configPath) : string.Empty;
 
+            // Keep BepInEx/plugin diagnostics visible while avoiding the expensive full Unity log bridge.
             config = UpsertIniValue(config, "Logging", "UnityLogListening", "false");
-            config = UpsertIniValue(config, "Logging.Console", "Enabled", "false");
+            config = UpsertIniValue(config, "Logging.Console", "Enabled", "true");
             config = UpsertIniValue(config, "Logging.Disk", "Enabled", "true");
             config = UpsertIniValue(config, "Logging.Disk", "WriteUnityLog", "false");
             config = UpsertIniValue(config, "Logging.Disk", "InstantFlushing", "false");
 
             File.WriteAllText(configPath, config, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            return new BepInExBootstrapResult(true, successMessage + " Low-overhead logging profile applied.");
+            return new BepInExBootstrapResult(true, successMessage + " Low-overhead logging profile with diagnostic console applied.");
         }
         catch (Exception ex)
         {
