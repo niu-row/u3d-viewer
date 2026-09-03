@@ -42,37 +42,48 @@ function Resolve-CMake {
 $cmake = Resolve-CMake
 $viewerProject = Join-Path $repoRoot "src/U3DViewer.Viewer/U3DViewer.Viewer.csproj"
 $nativeSource = Join-Path $repoRoot "native/U3DViewer.NativeBridge"
-$nativeBuild = Join-Path $repoRoot "build/native"
+$nativeBuildX64 = Join-Path $repoRoot "build/native"
+$nativeBuildX86 = Join-Path $repoRoot "build/native-x86"
 
 Push-Location $repoRoot
 try {
     Write-Host "U3DViewer local build" -ForegroundColor Green
     Write-Host "Configuration: $Configuration"
-    Write-Host "Target game:   selected later in the GUI"
+    Write-Host "Target game:   selected later in the GUI (x86/x64 detected automatically)"
 
     Invoke-External "Configure NativeBridge (x64)" {
-        & $cmake -S $nativeSource -B $nativeBuild -A x64
+        & $cmake -S $nativeSource -B $nativeBuildX64 -A x64
     }
 
-    Invoke-External "Build NativeBridge" {
-        & $cmake --build $nativeBuild --config $Configuration --parallel
+    Invoke-External "Build NativeBridge (x64)" {
+        & $cmake --build $nativeBuildX64 --config $Configuration --parallel
+    }
+
+    Invoke-External "Configure NativeBridge (x86)" {
+        & $cmake -S $nativeSource -B $nativeBuildX86 -A Win32
+    }
+
+    Invoke-External "Build NativeBridge (x86)" {
+        & $cmake --build $nativeBuildX86 --config $Configuration --parallel
     }
 
     Invoke-External "Build U3DViewer.Viewer" {
         & dotnet build $viewerProject -c $Configuration --nologo
     }
 
-    $nativeDll = Join-Path $nativeBuild "$Configuration/U3DViewer.NativeBridge.dll"
+    $nativeDllX64 = Join-Path $nativeBuildX64 "$Configuration/U3DViewer.NativeBridge.dll"
+    $nativeDllX86 = Join-Path $nativeBuildX86 "$Configuration/U3DViewer.NativeBridge.dll"
     $viewerExe = Join-Path $repoRoot "src/U3DViewer.Viewer/bin/$Configuration/net8.0/U3DViewer.Viewer.exe"
     $builderPayload = Join-Path $repoRoot "src/U3DViewer.Viewer/bin/$Configuration/net8.0/agent-builder"
 
     Write-Host ""
     Write-Host "Build completed." -ForegroundColor Green
-    Write-Host "NativeBridge: $nativeDll"
-    Write-Host "Viewer:       $viewerExe"
-    Write-Host "Agent Builder:$builderPayload"
+    Write-Host "NativeBridge x64: $nativeDllX64"
+    Write-Host "NativeBridge x86: $nativeDllX86"
+    Write-Host "Viewer:           $viewerExe"
+    Write-Host "Agent Builder:    $builderPayload"
     Write-Host ""
-    Write-Host "No gamePath/backend configuration is required. Start Viewer and choose a process or Open Game..." -ForegroundColor DarkCyan
+    Write-Host "No gamePath/backend/architecture configuration is required. Start Viewer and choose a process or Open Game..." -ForegroundColor DarkCyan
 }
 finally {
     Pop-Location
