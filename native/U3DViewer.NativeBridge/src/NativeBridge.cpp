@@ -20,6 +20,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+    constexpr int kNativeBridgeAbiVersion = 1;
     constexpr int kCopySceneTextureEvent = 1;
 
     std::mutex g_mutex;
@@ -245,6 +246,11 @@ namespace
             CopySceneTexture();
         }
     }
+}
+
+U3DVIEWER_EXPORT int U3DViewer_GetAbiVersion()
+{
+    return kNativeBridgeAbiVersion;
 }
 
 U3DVIEWER_EXPORT int U3DViewer_SetSourceTexture(void* nativeTexture, const wchar_t* sharedName)
