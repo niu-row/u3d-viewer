@@ -272,6 +272,17 @@ internal static class GameAutomation
                             $"BepInEx diagnostics: {DescribeBepInExLog(gameDirectory)}");
                     }
 
+                    if (backend == "Mono")
+                    {
+                        var preloaderFailure = FindLatestPreloaderFailureLog(gameDirectory, startedAt);
+                        if (preloaderFailure is not null)
+                        {
+                            return new GameAutomationResult(
+                                false,
+                                $"BepInEx Doorstop loaded, but the Mono preloader failed before the Agent became ready. Preloader log: {preloaderFailure}");
+                        }
+                    }
+
                     if (backend == "Mono" &&
                         !legacyProxyAttempted &&
                         DateTime.UtcNow - startedAt >= BepInExStartupProbeTimeout &&
@@ -338,6 +349,23 @@ internal static class GameAutomation
         File.Exists(Path.Combine(gameDirectory, "BepInEx", "LogOutput.log")) ||
         File.Exists(Path.Combine(gameDirectory, "BepInEx", "LogOutput.txt"));
 
+    private static string? FindLatestPreloaderFailureLog(string gameDirectory, DateTime notBeforeUtc)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(gameDirectory, "preloader_*.log", SearchOption.TopDirectoryOnly)
+                .Select(path => new FileInfo(path))
+                .Where(info => info.LastWriteTimeUtc >= notBeforeUtc.AddSeconds(-1))
+                .OrderByDescending(info => info.LastWriteTimeUtc)
+                .Select(info => info.FullName)
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string DescribeBepInExLog(string gameDirectory)
     {
         var logPath = Path.Combine(gameDirectory, "BepInEx", "LogOutput.log");
@@ -350,6 +378,22 @@ internal static class GameAutomation
         if (File.Exists(textPath))
         {
             return textPath;
+        }
+
+        try
+        {
+            var preloaderLog = Directory.EnumerateFiles(gameDirectory, "preloader_*.log", SearchOption.TopDirectoryOnly)
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(info => info.LastWriteTimeUtc)
+                .Select(info => info.FullName)
+                .FirstOrDefault();
+            if (preloaderLog is not null)
+            {
+                return $"preloader failure log: {preloaderLog}";
+            }
+        }
+        catch
+        {
         }
 
         return $"no LogOutput.log/.txt created yet under {Path.Combine(gameDirectory, "BepInEx")}";
