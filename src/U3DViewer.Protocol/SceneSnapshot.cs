@@ -31,7 +31,23 @@ public sealed class RenderTargetInfo
     public SceneCullingMode CullingMode { get; set; } = SceneCullingMode.MainCamera;
     public int CullingMask { get; set; } = -1;
     public string[] LayerNames { get; set; } = new string[0];
+    public CameraInfo[] Cameras { get; set; } = new CameraInfo[0];
+    public int SelectedCameraInstanceId { get; set; }
+    public int SourceCameraInstanceId { get; set; }
+    public string SourceCameraName { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
+}
+
+public sealed class CameraInfo
+{
+    public int InstanceId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public float Depth { get; set; }
+    public bool Enabled { get; set; }
+    public bool ActiveInHierarchy { get; set; }
+    public bool HasTargetTexture { get; set; }
+    public int TargetDisplay { get; set; }
+    public bool Orthographic { get; set; }
 }
 
 public sealed class PerformanceInfo
