@@ -44,8 +44,9 @@ internal sealed class PipeServer : IDisposable
             return;
         }
 
+        // Hierarchy updates are incremental after the initial baseline. Preserve ordering:
+        // dropping one delta would make all later deltas apply to the wrong Viewer state.
         _outbound.Enqueue(json);
-        while (_outbound.Count > 2 && _outbound.TryDequeue(out _)) { }
         _signal.Set();
     }
 
