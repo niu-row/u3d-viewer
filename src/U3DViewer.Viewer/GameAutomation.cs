@@ -28,15 +28,29 @@ internal static class GameAutomation
             return false;
         }
 
+        if (!UnityProcessDiscovery.TryGetExecutableArchitecture(executablePath, out var architecture))
+        {
+            reason = "The target game PE architecture could not be determined.";
+            return false;
+        }
+
+        if (architecture is not ("x86" or "x64"))
+        {
+            reason = $"Unsupported target game architecture: {architecture}.";
+            return false;
+        }
+
         if (!AgentBuilder.CanBuild(executablePath, backend, out reason))
         {
             return false;
         }
 
-        var nativePath = Path.Combine(AppContext.BaseDirectory, "U3DViewer.NativeBridge.dll");
+        var nativePath = GetNativeBridgeSourcePath(architecture);
         if (!File.Exists(nativePath))
         {
-            reason = "U3DViewer.NativeBridge.dll is missing next to the Viewer executable.";
+            reason = architecture == "x86"
+                ? "U3DViewer.NativeBridge.x86.dll is missing next to the Viewer executable. Rebuild U3DViewer so the Win32 NativeBridge is produced."
+                : "U3DViewer.NativeBridge.dll is missing next to the Viewer executable.";
             return false;
         }
 
@@ -63,7 +77,7 @@ internal static class GameAutomation
         IProgress<string>? progress,
         CancellationToken cancellationToken = default)
     {
-        if (!UnityProcessDiscovery.TryInspectExecutable(executablePath, out var backend))
+        if (!UnityProcessDiscovery.TryInspectExecutable(executablePath, out var backend, out _))
         {
             return new GameAutomationResult(false, "The selected executable does not look like a Unity standalone game.");
         }
@@ -82,7 +96,8 @@ internal static class GameAutomation
             return new GameAutomationResult(false, reason);
         }
 
-        progress?.Report($"Preparing Unity {backend} runtime...");
+        UnityProcessDiscovery.TryGetExecutableArchitecture(executablePath, out var architecture);
+        progress?.Report($"Preparing Unity {backend} {architecture} runtime...");
         var bepinex = await BepInExBootstrap.EnsureInstalledAsync(executablePath, backend, progress, cancellationToken);
         if (!bepinex.Success)
         {
@@ -104,8 +119,8 @@ internal static class GameAutomation
             return new GameAutomationResult(false, build.Message);
         }
 
-        progress?.Report("Deploying U3DViewer Agent into the selected game...");
-        var deploy = Deploy(executablePath, backend, build.AgentPath, build.ProtocolPath);
+        progress?.Report($"Deploying U3DViewer Agent and {architecture} NativeBridge into the selected game...");
+        var deploy = Deploy(executablePath, backend, architecture, build.AgentPath, build.ProtocolPath);
         if (!deploy.Success)
         {
             return deploy;
@@ -118,6 +133,7 @@ internal static class GameAutomation
     private static GameAutomationResult Deploy(
         string executablePath,
         string backend,
+        string architecture,
         string agentPath,
         string protocolPath)
     {
@@ -139,11 +155,13 @@ internal static class GameAutomation
             File.Copy(agentPath, Path.Combine(pluginDirectory, Path.GetFileName(agentPath)), overwrite: true);
             File.Copy(protocolPath, Path.Combine(pluginDirectory, "U3DViewer.Protocol.dll"), overwrite: true);
             File.Copy(
-                Path.Combine(AppContext.BaseDirectory, "U3DViewer.NativeBridge.dll"),
+                GetNativeBridgeSourcePath(architecture),
                 Path.Combine(gameDirectory, "U3DViewer.NativeBridge.dll"),
                 overwrite: true);
 
-            return new GameAutomationResult(true, $"Installed {backend} Agent into {pluginDirectory}.");
+            return new GameAutomationResult(
+                true,
+                $"Installed {backend} Agent and {architecture} NativeBridge into {pluginDirectory}.");
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -158,6 +176,11 @@ internal static class GameAutomation
             return new GameAutomationResult(false, $"Deployment failed: {ex.Message}");
         }
     }
+
+    private static string GetNativeBridgeSourcePath(string architecture) =>
+        Path.Combine(
+            AppContext.BaseDirectory,
+            architecture == "x86" ? "U3DViewer.NativeBridge.x86.dll" : "U3DViewer.NativeBridge.dll");
 
     private static async Task<GameAutomationResult> CloseExistingProcessAsync(
         int processId,
