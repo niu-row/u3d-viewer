@@ -90,6 +90,14 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Update()
     {
+        // Some games rewrite this setting during startup. Assert it before looking at the
+        // Viewer connection so the game is already background-capable before Viewer focus
+        // can pause the Unity main thread.
+        if (!Application.runInBackground)
+        {
+            Application.runInBackground = true;
+        }
+
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
@@ -107,13 +115,6 @@ public sealed class Plugin : BaseUnityPlugin
         if (!_viewerSessionActive)
         {
             BeginViewerSession();
-        }
-
-        // Some games rewrite this setting at runtime. Keep it asserted while the Agent is
-        // loaded so Viewer focus/minimize changes cannot stall the Unity main thread.
-        if (!Application.runInBackground)
-        {
-            Application.runInBackground = true;
         }
 
         UpdateGameFps();
