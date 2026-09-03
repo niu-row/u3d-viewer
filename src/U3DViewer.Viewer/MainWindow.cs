@@ -6,8 +6,6 @@ using Avalonia.Controls.Templates;
 using Avalonia.Data;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Media.Imaging;
-using Avalonia.Platform;
 using Avalonia.Threading;
 using U3DViewer.Protocol;
 
@@ -16,29 +14,19 @@ namespace U3DViewer.Viewer;
 internal sealed class MainWindow : Window
 {
     private readonly ViewerConnection _connection = new();
-    private readonly NativeSceneTextureReader _sceneReader = new();
-    private readonly SceneFramePump _sceneFramePump;
-    private readonly DispatcherTimer _sceneTimer = new();
     private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
     private readonly TreeView _hierarchy;
     private readonly TextBlock _connectionStatus;
     private readonly TextBlock _snapshotStatus;
     private readonly TextBlock _connectionDetail;
     private readonly StackPanel _inspectorContent;
-    private readonly Image _sceneImage;
     private readonly TextBlock _sceneStatus;
+    private readonly NativeSceneHost _sceneHost;
 
-    private SceneInputController? _sceneInputController;
     private HierarchyNode? _selectedNode;
-    private WriteableBitmap? _sceneBitmap;
-    private int _sceneDxgiFormat;
-    private string _sceneGpuStatus = string.Empty;
-    private string _sceneTransportKey = string.Empty;
 
     public MainWindow()
     {
-        _sceneFramePump = new SceneFramePump(_sceneReader);
-
         Title = "U3D Viewer";
         Width = 1400;
         Height = 850;
@@ -82,14 +70,6 @@ internal sealed class MainWindow : Window
         };
         RenderEmptyInspector();
 
-        _sceneImage = new Image
-        {
-            Stretch = Stretch.Uniform,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            IsVisible = false
-        };
-
         _sceneStatus = new TextBlock
         {
             Text = "Waiting for the target game's Scene render target...",
@@ -97,12 +77,17 @@ internal sealed class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 840,
-            Margin = new Thickness(14)
+            MaxWidth = 900,
+            Margin = new Thickness(14, 8)
         };
 
-        _sceneTimer.Interval = TimeSpan.FromMilliseconds(16);
-        _sceneTimer.Tick += (_, _) => RefreshSceneFrame();
+        _sceneHost = new NativeSceneHost(SendCameraCommand, FocusSelected)
+        {
+            Margin = new Thickness(10, 0, 10, 0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+        _sceneHost.StatusChanged += status => _sceneStatus.Text = status;
 
         Content = BuildLayout();
 
@@ -110,21 +95,11 @@ internal sealed class MainWindow : Window
         _connection.SnapshotReceived += snapshot => Dispatcher.UIThread.Post(() => ApplySnapshot(snapshot));
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
-        Opened += (_, _) =>
-        {
-            _connection.Start();
-            _sceneTimer.Start();
-        };
+        Opened += (_, _) => _connection.Start();
 
         Closed += (_, _) =>
         {
-            _sceneTimer.Stop();
-            _sceneInputController?.Dispose();
-            _sceneInputController = null;
-            _sceneFramePump.Dispose();
-            _sceneReader.Dispose();
-            _sceneBitmap?.Dispose();
-            _sceneBitmap = null;
+            _sceneHost.Shutdown();
             _ = _connection.DisposeAsync().AsTask();
         };
     }
@@ -211,7 +186,7 @@ internal sealed class MainWindow : Window
     {
         var panel = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,*")
+            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto")
         };
 
         panel.Children.Add(new TextBlock
@@ -235,30 +210,17 @@ internal sealed class MainWindow : Window
         Grid.SetRow(toolbar, 1);
         panel.Children.Add(toolbar);
 
-        var sceneSurface = new Grid();
-        sceneSurface.Children.Add(_sceneImage);
+        Grid.SetRow(_sceneHost, 2);
+        panel.Children.Add(_sceneHost);
 
         var statusBorder = new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(180, 24, 24, 24)),
+            Background = new SolidColorBrush(Color.FromArgb(220, 24, 24, 24)),
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Bottom,
             Child = _sceneStatus
         };
-        sceneSurface.Children.Add(statusBorder);
-
-        var inputSurface = new Border
-        {
-            Focusable = true,
-            Margin = new Thickness(10),
-            BorderBrush = Brushes.Gray,
-            BorderThickness = new Thickness(1),
-            Background = Brushes.Black,
-            Child = sceneSurface
-        };
-        _sceneInputController = new SceneInputController(inputSurface, SendCameraCommand, FocusSelected);
-        Grid.SetRow(inputSurface, 2);
-        panel.Children.Add(inputSurface);
+        Grid.SetRow(statusBorder, 3);
+        panel.Children.Add(statusBorder);
 
         return panel;
     }
@@ -339,15 +301,13 @@ internal sealed class MainWindow : Window
             case ConnectionState.Connected:
                 _connectionStatus.Text = "● Connected";
                 _connectionStatus.Foreground = Brushes.Green;
-                _connectionDetail.Text = "Receiving hierarchy and Scene Camera state";
+                _connectionDetail.Text = "Receiving hierarchy and GPU Scene Camera state";
                 break;
             default:
                 _connectionStatus.Text = "● Disconnected";
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
-                StopSceneTransport();
-                _sceneGpuStatus = string.Empty;
-                _sceneStatus.Text = "Waiting for the target game's Scene render target...";
+                _sceneHost.SetRenderTarget(null);
                 break;
         }
     }
@@ -355,113 +315,13 @@ internal sealed class MainWindow : Window
     private void ApplySnapshot(SceneSnapshot snapshot)
     {
         _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
-        UpdateRenderTarget(snapshot.RenderTarget);
+        _sceneHost.SetRenderTarget(snapshot.RenderTarget);
         SyncScenes(snapshot.Scenes);
 
         if (_selectedNode?.GameObject is not null)
         {
             RenderInspector(_selectedNode.GameObject);
         }
-    }
-
-    private void UpdateRenderTarget(RenderTargetInfo? target)
-    {
-        if (target is null || !target.Available)
-        {
-            StopSceneTransport();
-            _sceneGpuStatus = string.Empty;
-            _sceneStatus.Text = target?.Status ?? "Agent did not publish Scene render target information.";
-            return;
-        }
-
-        var transportKey = $"{target.SharedName}|{target.AdapterLuid:X16}|{target.Width}x{target.Height}|{target.DxgiFormat}";
-        if (!string.Equals(_sceneTransportKey, transportKey, StringComparison.Ordinal))
-        {
-            StopSceneTransport();
-        }
-
-        if (!_sceneReader.Open(target))
-        {
-            _sceneFramePump.Stop();
-            _sceneTransportKey = string.Empty;
-            _sceneGpuStatus = string.Empty;
-            _sceneStatus.Text = _sceneReader.LastStatus;
-            return;
-        }
-
-        if (!string.Equals(_sceneTransportKey, transportKey, StringComparison.Ordinal))
-        {
-            _sceneTransportKey = transportKey;
-            _sceneFramePump.Start(target.Width, target.Height);
-        }
-
-        _sceneGpuStatus = _sceneReader.DescribeGpuPair(target);
-
-        if (_sceneBitmap is null ||
-            _sceneBitmap.PixelSize.Width != target.Width ||
-            _sceneBitmap.PixelSize.Height != target.Height ||
-            _sceneDxgiFormat != target.DxgiFormat)
-        {
-            _sceneBitmap?.Dispose();
-            _sceneDxgiFormat = target.DxgiFormat;
-
-            var pixelFormat = target.DxgiFormat switch
-            {
-                87 or 91 => PixelFormats.Bgra8888,
-                _ => PixelFormats.Rgba8888
-            };
-
-            _sceneBitmap = new WriteableBitmap(
-                new PixelSize(target.Width, target.Height),
-                new Vector(96, 96),
-                pixelFormat,
-                AlphaFormat.Opaque);
-            _sceneImage.Source = _sceneBitmap;
-        }
-
-        _sceneStatus.Text = BuildSceneStatus($"{target.Width}×{target.Height} · DXGI {target.DxgiFormat}");
-    }
-
-    private void RefreshSceneFrame()
-    {
-        var bitmap = _sceneBitmap;
-        if (bitmap is null)
-        {
-            return;
-        }
-
-        try
-        {
-            using var framebuffer = bitmap.Lock();
-            if (_sceneFramePump.TryCopyLatest(
-                    framebuffer.Address,
-                    framebuffer.RowBytes,
-                    framebuffer.Size.Height,
-                    out var width,
-                    out var height,
-                    out var dxgiFormat))
-            {
-                _sceneImage.IsVisible = true;
-                _sceneStatus.Text = BuildSceneStatus($"LIVE · {width}×{height} · DXGI {dxgiFormat}");
-                _sceneImage.InvalidateVisual();
-            }
-        }
-        catch (Exception ex)
-        {
-            _sceneStatus.Text = $"Scene frame update failed: {ex.Message}\n{_sceneGpuStatus}";
-            ViewerLog.Error("Scene frame update failed.", ex);
-        }
-    }
-
-    private string BuildSceneStatus(string prefix) =>
-        $"{prefix} · RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus\n" +
-        _sceneGpuStatus;
-
-    private void StopSceneTransport()
-    {
-        _sceneFramePump.Stop();
-        _sceneReader.Reset();
-        _sceneTransportKey = string.Empty;
     }
 
     private void SyncScenes(IReadOnlyList<SceneInfo> scenes)
