@@ -23,6 +23,7 @@ internal sealed class NativeSceneHost : NativeControlHost
     private RenderTargetInfo? _target;
     private string _targetKey = string.Empty;
     private bool _presenterOpen;
+    private int _presentInFlight;
     private DateTime _lastOpenAttemptUtc = DateTime.MinValue;
     private long _lastTickTimestamp = Stopwatch.GetTimestamp();
     private float _moveSpeed = 10f;
@@ -119,17 +120,68 @@ internal sealed class NativeSceneHost : NativeControlHost
 
         if (_presenterOpen)
         {
-            var presentResult = U3DViewer_PresentScene(_hostWindow);
-            if (presentResult < 0)
-            {
-                var hresult = U3DViewer_GetScenePresenterLastError(_hostWindow);
-                SetStatus($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}). Retrying...");
-                ViewerLog.Error($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}).");
-                ClosePresenter();
-            }
+            QueuePresent();
         }
 
         PollInput(deltaSeconds);
+    }
+
+    private void QueuePresent()
+    {
+        var window = _hostWindow;
+        if (window == IntPtr.Zero || !_presenterOpen || Interlocked.CompareExchange(ref _presentInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            var presentResult = 0;
+            var hresult = 0;
+            Exception? failure = null;
+
+            try
+            {
+                presentResult = U3DViewer_PresentScene(window);
+                if (presentResult < 0)
+                {
+                    hresult = U3DViewer_GetScenePresenterLastError(window);
+                }
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _presentInFlight, 0);
+            }
+
+            if (presentResult >= 0 && failure is null)
+            {
+                return;
+            }
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (window != _hostWindow || !_presenterOpen)
+                {
+                    return;
+                }
+
+                if (failure is not null)
+                {
+                    SetStatus($"Scene GPU presentation failed: {failure.Message}. Retrying...");
+                    ViewerLog.Error("Scene GPU presentation threw an exception.", failure);
+                }
+                else
+                {
+                    SetStatus($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}). Retrying...");
+                    ViewerLog.Error($"Scene GPU presentation failed (HRESULT 0x{hresult:X8}).");
+                }
+                ClosePresenter();
+            });
+        });
     }
 
     private void TryOpenPresenter(bool force)
@@ -246,7 +298,9 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     private void ClosePresenter()
     {
-        if (_hostWindow != IntPtr.Zero && _presenterOpen)
+        var wasOpen = _presenterOpen;
+        _presenterOpen = false;
+        if (_hostWindow != IntPtr.Zero && wasOpen)
         {
             try
             {
@@ -257,8 +311,6 @@ internal sealed class NativeSceneHost : NativeControlHost
                 // The native child may already be going away during window shutdown.
             }
         }
-
-        _presenterOpen = false;
     }
 
     private string GetPresenterAdapterName()
