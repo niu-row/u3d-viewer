@@ -14,26 +14,23 @@ The project is split into a game-side runtime agent and a standalone viewer:
 
 The repository includes `.vscode/tasks.json` plus local PowerShell build/deploy scripts.
 
-1. Run `Tasks: Run Task` -> `U3DViewer: Create Local Config` once.
-2. Edit `u3dviewer.local.json` and set `backend` (`Mono` or `IL2CPP`) plus the target game's root `gamePath`.
-3. Press `Ctrl+Shift+B`.
+Press `Ctrl+Shift+B` to run the default `U3DViewer: Build` task.
 
-The default VSCode build task performs, in sequence:
+The default build no longer requires `u3dviewer.local.json` or a valid `gamePath`. It always builds:
 
 ```text
-stage target Unity references when needed
-  -> configure/build NativeBridge x64
-  -> build the selected Mono/IL2CPP Agent
-  -> build Viewer
-  -> deploy Agent + Protocol into BepInEx/plugins/U3DViewer
-  -> deploy NativeBridge next to the game executable and Viewer
+NativeBridge x64
+  -> any Agent backend whose Unity references are already available
+  -> Viewer
 ```
 
-When the Viewer is built after an Agent, that Agent DLL is also bundled under `payload/Mono` or `payload/IL2CPP`. This lets the Viewer perform GUI-side installation without invoking `deploy.ps1`.
+If `u3dviewer.local.json` contains a valid `backend` + `gamePath`, the build also stages that game's Unity reference assemblies when necessary and builds the matching Agent payload. If no usable Unity references are available, the build prints a warning and still produces Viewer + NativeBridge instead of failing.
 
-`u3dviewer.local.json` and local build output are ignored by Git. For IL2CPP, run the target game with BepInEx once before the first build so `BepInEx/interop` exists.
+When the Viewer is built after an Agent, that Agent DLL is bundled under `payload/Mono` or `payload/IL2CPP`. This enables GUI-side `Install + Restart` / `Open Game...` deployment for that backend.
 
-Other VSCode tasks include build-only, deploy-only, and `U3DViewer: Build + Deploy + Run Viewer`.
+`u3dviewer.local.json` is now optional for the normal GUI-first workflow. It is still useful when you want to prebuild a target-specific Agent payload or use the explicit `Deploy` tasks. Local config and build output are ignored by Git. For IL2CPP, BepInEx must have generated `BepInEx/interop` before a target-specific IL2CPP Agent can be built.
+
+Other VSCode tasks include `Build + Deploy`, deploy-only, and `Build + Deploy + Run Viewer`.
 
 ## GUI launch / attach automation
 
