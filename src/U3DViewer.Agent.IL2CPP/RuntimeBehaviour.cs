@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using BepInEx.Logging;
 using U3DViewer.Protocol;
 using UnityEngine;
@@ -16,12 +18,21 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static ManualLogSource? _log;
     private static SceneCameraController? _sceneCamera;
     private static SceneScanner.SceneScanSession? _sceneScan;
-    private static Task<string>? _snapshotSerialization;
+    private static Task<SerializedSnapshot>? _snapshotSerialization;
     private static readonly HashSet<int> ExpandedInstanceIds = new();
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
     private static bool _interactiveHierarchyRefresh;
+    private static int _currentScanNodes;
+    private static double _currentScanMs;
+    private static double _lastScanMs;
+    private static double _averageScanMs;
+    private static double _maxScanMs;
+    private static long _scanSamples;
+    private static int _lastScanNodes;
+    private static double _lastSerializeMs;
+    private static int _lastSnapshotBytes;
     private static bool _originalRunInBackground;
     private static bool _runInBackgroundCaptured;
 
@@ -45,6 +56,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sequence = 0;
         _selectedInstanceId = 0;
         _interactiveHierarchyRefresh = false;
+        ResetPerformanceMetrics();
         _log.LogInfo("Background execution forced on for U3DViewer mode.");
     }
 
@@ -125,6 +137,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
             try
             {
+                _currentScanNodes = 0;
+                _currentScanMs = 0;
                 _sceneScan = SceneScanner.Begin(
                     ++_sequence,
                     _selectedInstanceId,
@@ -148,25 +162,37 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                 ? InteractiveHierarchyScanBudgetMilliseconds
                 : HierarchyScanBudgetMilliseconds;
 
-            _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
+            var scanStarted = Stopwatch.GetTimestamp();
+            var processed = _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
+            _currentScanNodes += processed;
+            _currentScanMs += ElapsedMilliseconds(scanStarted);
+
             if (!_sceneScan.IsComplete)
             {
                 return;
             }
 
+            RecordHierarchyScan(_currentScanNodes, _currentScanMs);
+
             var snapshot = _sceneScan.Snapshot;
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
+            snapshot.Performance = BuildPerformanceInfo();
+            _sceneCamera?.PopulatePerformance(snapshot.Performance);
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
             _interactiveHierarchyRefresh = false;
+            _currentScanNodes = 0;
+            _currentScanMs = 0;
 
-            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
+            _snapshotSerialization = Task.Run(() => SerializeSnapshot(snapshot));
         }
         catch (Exception ex)
         {
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
             _interactiveHierarchyRefresh = false;
+            _currentScanNodes = 0;
+            _currentScanMs = 0;
             _log?.LogError($"Failed to advance IL2CPP scene scan: {ex}");
         }
     }
@@ -192,7 +218,10 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _snapshotSerialization = null;
         if (task.Status == TaskStatus.RanToCompletion)
         {
-            pipeServer.Publish(task.Result);
+            var result = task.Result;
+            _lastSerializeMs = result.SerializeMs;
+            _lastSnapshotBytes = result.Bytes;
+            pipeServer.Publish(result.Json);
             return;
         }
 
@@ -202,10 +231,42 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         }
     }
 
+    private static SerializedSnapshot SerializeSnapshot(SceneSnapshot snapshot)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var json = JsonSnapshotWriter.Write(snapshot);
+        var serializeMs = ElapsedMilliseconds(started);
+        return new SerializedSnapshot(json, Encoding.UTF8.GetByteCount(json), serializeMs);
+    }
+
+    private static PerformanceInfo BuildPerformanceInfo() => new()
+    {
+        HierarchyNodes = _lastScanNodes,
+        HierarchyScanMs = _lastScanMs,
+        HierarchyScanAverageMs = _averageScanMs,
+        HierarchyScanMaxMs = _maxScanMs,
+        SnapshotSerializeMs = _lastSerializeMs,
+        SnapshotBytes = _lastSnapshotBytes
+    };
+
+    private static void RecordHierarchyScan(int nodes, double milliseconds)
+    {
+        _lastScanNodes = nodes;
+        _lastScanMs = milliseconds;
+        _scanSamples++;
+        _averageScanMs += (milliseconds - _averageScanMs) / _scanSamples;
+        _maxScanMs = Math.Max(_maxScanMs, milliseconds);
+    }
+
+    private static double ElapsedMilliseconds(long started) =>
+        (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
+
     private static void RestartHierarchyScan()
     {
         _sceneScan = null;
         _snapshotSerialization = null;
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
         _nextSnapshotAt = 0f;
     }
 
@@ -213,6 +274,21 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     {
         _sceneScan = null;
         _snapshotSerialization = null;
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
+    }
+
+    private static void ResetPerformanceMetrics()
+    {
+        _currentScanNodes = 0;
+        _currentScanMs = 0;
+        _lastScanMs = 0;
+        _averageScanMs = 0;
+        _maxScanMs = 0;
+        _scanSamples = 0;
+        _lastScanNodes = 0;
+        _lastSerializeMs = 0;
+        _lastSnapshotBytes = 0;
     }
 
     private static void RestoreBackgroundExecution()
@@ -224,5 +300,19 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
         Application.runInBackground = _originalRunInBackground;
         _runInBackgroundCaptured = false;
+    }
+
+    private sealed class SerializedSnapshot
+    {
+        public SerializedSnapshot(string json, int bytes, double serializeMs)
+        {
+            Json = json;
+            Bytes = bytes;
+            SerializeMs = serializeMs;
+        }
+
+        public string Json { get; }
+        public int Bytes { get; }
+        public double SerializeMs { get; }
     }
 }
