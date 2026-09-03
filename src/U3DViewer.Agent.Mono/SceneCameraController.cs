@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using U3DViewer.Protocol;
 using UnityEngine;
@@ -367,7 +368,7 @@ internal sealed class SceneCameraController : IDisposable
         catch (DllNotFoundException)
         {
             _nativeBridgeAbiVersion = 0;
-            _renderStatus = "U3DViewer.NativeBridge.dll was not found. Copy the x64 DLL next to the target game executable.";
+            _renderStatus = "U3DViewer.NativeBridge.dll was not found next to the target game executable.";
         }
         catch (EntryPointNotFoundException)
         {
@@ -461,7 +462,25 @@ internal sealed class SceneCameraController : IDisposable
     }
 
     private static string DisplayAdapterName(string value) =>
-        string.IsNullOrWhiteSpace(value) ? "an unknown GPU" : value;
+        IsNullOrWhiteSpace(value) ? "an unknown GPU" : value;
+
+    private static bool IsNullOrWhiteSpace(string value)
+    {
+        if (value == null)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (!char.IsWhiteSpace(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private void CopyFromGameCamera()
     {
