@@ -82,7 +82,7 @@ internal static class JsonSnapshotWriter
 
         try
         {
-            return NativeBridge.U3DViewer_IsSceneWriterReady() != 0;
+            return NativeBridge.U3DViewer_IsSceneWriterReady(target.SharedName) != 0;
         }
         catch
         {
