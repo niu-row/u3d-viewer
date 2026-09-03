@@ -42,6 +42,11 @@ internal static class JsonSnapshotWriter
         NumberProperty(sb, "dxgiFormat", target.DxgiFormat); sb.Append(',');
         UnsignedNumberProperty(sb, "adapterLuid", target.AdapterLuid); sb.Append(',');
         Property(sb, "adapterName", target.AdapterName); sb.Append(',');
+        BoolProperty(sb, "orthographic", target.Orthographic); sb.Append(',');
+        FloatProperty(sb, "fieldOfView", target.FieldOfView); sb.Append(',');
+        FloatProperty(sb, "nearClipPlane", target.NearClipPlane); sb.Append(',');
+        FloatProperty(sb, "farClipPlane", target.FarClipPlane); sb.Append(',');
+        FloatProperty(sb, "orthographicSize", target.OrthographicSize); sb.Append(',');
         Property(sb, "status", target.Status);
         sb.Append('}');
     }
