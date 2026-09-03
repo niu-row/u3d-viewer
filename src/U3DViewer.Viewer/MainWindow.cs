@@ -489,6 +489,11 @@ internal sealed class MainWindow : Window
 
     private void SyncGameObjects(ObservableCollection<HierarchyNode> target, IReadOnlyList<GameObjectInfo> objects)
     {
+        if (objects.Count > 0)
+        {
+            RemovePlaceholders(target);
+        }
+
         var desiredIds = new HashSet<int>();
 
         for (var index = 0; index < objects.Count; index++)
@@ -543,8 +548,27 @@ internal sealed class MainWindow : Window
         }
     }
 
+    private static void RemovePlaceholders(ObservableCollection<HierarchyNode> children)
+    {
+        for (var index = children.Count - 1; index >= 0; index--)
+        {
+            if (children[index].IsPlaceholder)
+            {
+                children.RemoveAt(index);
+            }
+        }
+    }
+
     private static void EnsurePlaceholder(HierarchyNode node)
     {
+        // Preserve already-loaded children while a branch is collapsed. They are a useful
+        // local cache and make re-expanding the same branch instant. The next expanded
+        // snapshot will refresh them against the live runtime hierarchy.
+        if (node.Children.Any(child => !child.IsPlaceholder))
+        {
+            return;
+        }
+
         if (node.Children.Count == 1 && node.Children[0].IsPlaceholder)
         {
             return;
