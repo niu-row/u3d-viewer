@@ -16,6 +16,9 @@ internal static class JsonSnapshotWriter
         sb.Append("\"renderTarget\":");
         WriteRenderTarget(sb, snapshot.RenderTarget);
         sb.Append(',');
+        sb.Append("\"performance\":");
+        WritePerformance(sb, snapshot.Performance);
+        sb.Append(',');
         sb.Append("\"scenes\":[");
         for (var i = 0; i < snapshot.Scenes.Length; i++)
         {
@@ -47,7 +50,25 @@ internal static class JsonSnapshotWriter
         FloatProperty(sb, "nearClipPlane", target.NearClipPlane); sb.Append(',');
         FloatProperty(sb, "farClipPlane", target.FarClipPlane); sb.Append(',');
         FloatProperty(sb, "orthographicSize", target.OrthographicSize); sb.Append(',');
+        FloatProperty(sb, "moveSpeed", target.MoveSpeed); sb.Append(',');
+        FloatProperty(sb, "idleFps", target.IdleFps); sb.Append(',');
+        FloatProperty(sb, "interactiveFps", target.InteractiveFps); sb.Append(',');
         Property(sb, "status", target.Status);
+        sb.Append('}');
+    }
+
+    private static void WritePerformance(StringBuilder sb, PerformanceInfo performance)
+    {
+        sb.Append('{');
+        NumberProperty(sb, "hierarchyNodes", performance.HierarchyNodes); sb.Append(',');
+        DoubleProperty(sb, "hierarchyScanMs", performance.HierarchyScanMs); sb.Append(',');
+        DoubleProperty(sb, "hierarchyScanAverageMs", performance.HierarchyScanAverageMs); sb.Append(',');
+        DoubleProperty(sb, "hierarchyScanMaxMs", performance.HierarchyScanMaxMs); sb.Append(',');
+        DoubleProperty(sb, "sceneRenderMs", performance.SceneRenderMs); sb.Append(',');
+        DoubleProperty(sb, "sceneRenderAverageMs", performance.SceneRenderAverageMs); sb.Append(',');
+        DoubleProperty(sb, "sceneRenderMaxMs", performance.SceneRenderMaxMs); sb.Append(',');
+        DoubleProperty(sb, "snapshotSerializeMs", performance.SnapshotSerializeMs); sb.Append(',');
+        NumberProperty(sb, "snapshotBytes", performance.SnapshotBytes);
         sb.Append('}');
     }
 
@@ -132,6 +153,11 @@ internal static class JsonSnapshotWriter
     }
 
     private static void FloatProperty(StringBuilder sb, string name, float value)
+    {
+        String(sb, name); sb.Append(':').Append(value.ToString("R", CultureInfo.InvariantCulture));
+    }
+
+    private static void DoubleProperty(StringBuilder sb, string name, double value)
     {
         String(sb, name); sb.Append(':').Append(value.ToString("R", CultureInfo.InvariantCulture));
     }
