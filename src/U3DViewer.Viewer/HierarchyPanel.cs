@@ -64,6 +64,11 @@ internal sealed class HierarchyPanel : Border
     public void ApplyScenes(IReadOnlyList<SceneInfo> scenes)
     {
         var desiredKeys = new HashSet<string>();
+        var existingScenes = new Dictionary<string, HierarchyNode>(StringComparer.Ordinal);
+        foreach (var existing in _rootNodes)
+        {
+            existingScenes[existing.Key] = existing;
+        }
 
         for (var index = 0; index < scenes.Count; index++)
         {
@@ -71,16 +76,16 @@ internal sealed class HierarchyPanel : Border
             var key = $"scene:{scene.BuildIndex}:{scene.Name}";
             desiredKeys.Add(key);
 
-            var node = _rootNodes.FirstOrDefault(item => item.Key == key);
-            if (node is null)
+            if (!existingScenes.TryGetValue(key, out var node))
             {
                 node = HierarchyNode.Scene(key, scene.Name, scene.BuildIndex);
                 _rootNodes.Insert(Math.Min(index, _rootNodes.Count), node);
+                existingScenes[key] = node;
             }
-            else
+            else if (index < _rootNodes.Count && !ReferenceEquals(_rootNodes[index], node))
             {
                 var currentIndex = _rootNodes.IndexOf(node);
-                if (currentIndex != index && index < _rootNodes.Count)
+                if (currentIndex >= 0 && currentIndex != index)
                 {
                     _rootNodes.Move(currentIndex, index);
                 }
@@ -136,22 +141,31 @@ internal sealed class HierarchyPanel : Border
             RemovePlaceholders(target);
         }
 
+        var existingById = new Dictionary<int, HierarchyNode>();
+        foreach (var existing in target)
+        {
+            if (!existing.IsPlaceholder && existing.InstanceId is int instanceId)
+            {
+                existingById[instanceId] = existing;
+            }
+        }
+
         var desiredIds = new HashSet<int>();
         for (var index = 0; index < objects.Count; index++)
         {
             var gameObject = objects[index];
             desiredIds.Add(gameObject.InstanceId);
 
-            var node = target.FirstOrDefault(item => !item.IsPlaceholder && item.InstanceId == gameObject.InstanceId);
-            if (node is null)
+            if (!existingById.TryGetValue(gameObject.InstanceId, out var node))
             {
                 node = HierarchyNode.FromGameObject(gameObject);
                 target.Insert(Math.Min(index, target.Count), node);
+                existingById[gameObject.InstanceId] = node;
             }
-            else
+            else if (index < target.Count && !ReferenceEquals(target[index], node))
             {
                 var currentIndex = target.IndexOf(node);
-                if (currentIndex != index && index < target.Count)
+                if (currentIndex >= 0 && currentIndex != index)
                 {
                     target.Move(currentIndex, index);
                 }
