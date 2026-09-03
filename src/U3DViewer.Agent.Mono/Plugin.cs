@@ -116,6 +116,12 @@ public sealed class Plugin : BaseUnityPlugin
                         {
                             _sceneCulling?.Reapply();
                         }
+
+                        if (command.Kind == ViewerCommandKind.CameraStreamSettings)
+                        {
+                            _interactiveHierarchyRefresh = true;
+                            RestartHierarchyScan();
+                        }
                         break;
                 }
             }
