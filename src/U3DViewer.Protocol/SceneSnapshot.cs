@@ -27,6 +27,9 @@ public sealed class RenderTargetInfo
     public float MoveSpeed { get; set; }
     public float IdleFps { get; set; }
     public float InteractiveFps { get; set; }
+    public SceneCullingMode CullingMode { get; set; } = SceneCullingMode.MainCamera;
+    public int CullingMask { get; set; } = -1;
+    public string[] LayerNames { get; set; } = Array.Empty<string>();
     public string Status { get; set; } = string.Empty;
 }
 
