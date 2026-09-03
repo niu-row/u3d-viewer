@@ -9,13 +9,16 @@ internal sealed class SceneCameraController : IDisposable
 {
     private const int RenderWidth = 1280;
     private const int RenderHeight = 720;
-    private const float RenderInterval = 1f / 30f;
+    private const float IdleRenderInterval = 1f / 30f;
+    private const float InteractiveRenderInterval = 1f / 60f;
+    private const float InteractiveHoldSeconds = 0.2f;
 
     private GameObject? _cameraObject;
     private Camera? _camera;
     private RenderTexture? _renderTexture;
     private float _moveSpeed = 10f;
     private float _nextRenderAt;
+    private float _interactiveUntil;
     private bool _bridgeReady;
     private IntPtr _renderEvent;
     private int _copyEventId;
@@ -41,6 +44,7 @@ internal sealed class SceneCameraController : IDisposable
                     transform.right * command.Y +
                     transform.up * command.Z;
                 transform.position += movement * (_moveSpeed * deltaSeconds);
+                BoostInteractiveRender();
                 break;
             }
             case ViewerCommandKind.CameraLook:
@@ -49,6 +53,7 @@ internal sealed class SceneCameraController : IDisposable
                 var pitch = NormalizePitch(euler.x + command.Y);
                 var yaw = euler.y + command.X;
                 transform.rotation = Quaternion.Euler(pitch, yaw, 0f);
+                BoostInteractiveRender();
                 break;
             }
             case ViewerCommandKind.CameraSpeed:
@@ -56,9 +61,11 @@ internal sealed class SceneCameraController : IDisposable
                 break;
             case ViewerCommandKind.CameraProjection:
                 camera.orthographic = command.Flag;
+                BoostInteractiveRender();
                 break;
             case ViewerCommandKind.CameraReset:
                 CopyFromGameCamera();
+                BoostInteractiveRender();
                 break;
             case ViewerCommandKind.CameraFocus:
             {
@@ -66,6 +73,7 @@ internal sealed class SceneCameraController : IDisposable
                 if (target is not null)
                 {
                     Focus(target.transform.position);
+                    BoostInteractiveRender();
                 }
                 break;
             }
@@ -75,12 +83,16 @@ internal sealed class SceneCameraController : IDisposable
     public void TickRender()
     {
         EnsureCamera();
-        if (!_bridgeReady || _camera is null || Time.unscaledTime < _nextRenderAt)
+        var now = Time.unscaledTime;
+        if (!_bridgeReady || _camera is null || now < _nextRenderAt)
         {
             return;
         }
 
-        _nextRenderAt = Time.unscaledTime + RenderInterval;
+        var interval = now < _interactiveUntil
+            ? InteractiveRenderInterval
+            : IdleRenderInterval;
+        _nextRenderAt = now + interval;
 
         try
         {
@@ -187,6 +199,13 @@ internal sealed class SceneCameraController : IDisposable
         {
             _renderStatus = $"NativeBridge initialization failed: {ex.Message}";
         }
+    }
+
+    private void BoostInteractiveRender()
+    {
+        var now = Time.unscaledTime;
+        _interactiveUntil = now + InteractiveHoldSeconds;
+        _nextRenderAt = Mathf.Min(_nextRenderAt, now);
     }
 
     private static string DisplayAdapterName(string value) =>
