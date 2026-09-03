@@ -24,11 +24,17 @@ internal sealed class MainWindow : Window
     private readonly TextBlock _connectionDetail;
     private readonly StackPanel _inspectorContent;
     private readonly TextBlock _sceneStatus;
+    private readonly TextBlock _performanceStatus;
+    private readonly TextBlock _moveSpeedStatus;
     private readonly NativeSceneHost _sceneHost;
     private readonly TextBox _fovBox;
     private readonly TextBox _nearBox;
     private readonly TextBox _farBox;
     private readonly TextBox _orthographicSizeBox;
+    private readonly TextBox _idleFpsBox;
+    private readonly TextBox _interactiveFpsBox;
+    private readonly TextBox _renderWidthBox;
+    private readonly TextBox _renderHeightBox;
 
     private HierarchyNode? _selectedNode;
 
@@ -87,17 +93,41 @@ internal sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             MaxWidth = 900,
-            Margin = new Thickness(14, 8)
+            Margin = new Thickness(14, 8, 14, 2)
         };
 
-        _fovBox = CreateLensTextBox("60");
-        _nearBox = CreateLensTextBox("0.001");
-        _farBox = CreateLensTextBox("10000");
-        _orthographicSizeBox = CreateLensTextBox("5");
+        _performanceStatus = new TextBlock
+        {
+            Text = "Perf · waiting for Agent metrics",
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = 1000,
+            Margin = new Thickness(14, 2, 14, 8),
+            FontSize = 12
+        };
+
+        _moveSpeedStatus = new TextBlock
+        {
+            Text = "Speed 10 u/s",
+            VerticalAlignment = VerticalAlignment.Center,
+            FontWeight = FontWeight.SemiBold
+        };
+
+        _fovBox = CreateValueTextBox("60");
+        _nearBox = CreateValueTextBox("0.001");
+        _farBox = CreateValueTextBox("10000");
+        _orthographicSizeBox = CreateValueTextBox("5");
         _fovBox.LostFocus += (_, _) => ApplyLensFromControls();
         _nearBox.LostFocus += (_, _) => ApplyLensFromControls();
         _farBox.LostFocus += (_, _) => ApplyLensFromControls();
         _orthographicSizeBox.LostFocus += (_, _) => ApplyLensFromControls();
+
+        _idleFpsBox = CreateValueTextBox("15");
+        _interactiveFpsBox = CreateValueTextBox("30");
+        _renderWidthBox = CreateValueTextBox("1280");
+        _renderHeightBox = CreateValueTextBox("720");
 
         _sceneHost = new NativeSceneHost(SendCameraCommand, FocusSelected)
         {
@@ -106,6 +136,7 @@ internal sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Stretch
         };
         _sceneHost.StatusChanged += status => _sceneStatus.Text = status;
+        _sceneHost.MoveSpeedChanged += speed => _moveSpeedStatus.Text = $"Speed {speed:0.##} u/s";
 
         Content = BuildLayout();
 
@@ -204,7 +235,7 @@ internal sealed class MainWindow : Window
     {
         var panel = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto")
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto")
         };
 
         panel.Children.Add(new TextBlock
@@ -235,24 +266,50 @@ internal sealed class MainWindow : Window
             Margin = new Thickness(10, 0, 10, 8),
             VerticalAlignment = VerticalAlignment.Center
         };
-        lensToolbar.Children.Add(CreateLensField("FOV", _fovBox));
-        lensToolbar.Children.Add(CreateLensField("Near", _nearBox));
-        lensToolbar.Children.Add(CreateLensField("Far", _farBox));
-        lensToolbar.Children.Add(CreateLensField("Ortho Size", _orthographicSizeBox));
+        lensToolbar.Children.Add(CreateValueField("FOV", _fovBox));
+        lensToolbar.Children.Add(CreateValueField("Near", _nearBox));
+        lensToolbar.Children.Add(CreateValueField("Far", _farBox));
+        lensToolbar.Children.Add(CreateValueField("Ortho Size", _orthographicSizeBox));
         lensToolbar.Children.Add(CreateCommandButton("Apply Lens", ApplyLensFromControls));
         Grid.SetRow(lensToolbar, 2);
         panel.Children.Add(lensToolbar);
 
-        Grid.SetRow(_sceneHost, 3);
+        var streamToolbar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Margin = new Thickness(10, 0, 10, 8),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        streamToolbar.Children.Add(CreateValueField("Idle FPS", _idleFpsBox));
+        streamToolbar.Children.Add(CreateValueField("Active FPS", _interactiveFpsBox));
+        streamToolbar.Children.Add(CreateValueField("Width", _renderWidthBox));
+        streamToolbar.Children.Add(CreateValueField("Height", _renderHeightBox));
+        streamToolbar.Children.Add(CreateCommandButton("Apply Stream", ApplyStreamFromControls));
+        streamToolbar.Children.Add(new Border { Width = 8 });
+        streamToolbar.Children.Add(_moveSpeedStatus);
+        Grid.SetRow(streamToolbar, 3);
+        panel.Children.Add(streamToolbar);
+
+        Grid.SetRow(_sceneHost, 4);
         panel.Children.Add(_sceneHost);
 
+        var statusPanel = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Children =
+            {
+                _sceneStatus,
+                _performanceStatus
+            }
+        };
         var statusBorder = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(220, 24, 24, 24)),
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            Child = _sceneStatus
+            Child = statusPanel
         };
-        Grid.SetRow(statusBorder, 4);
+        Grid.SetRow(statusBorder, 5);
         panel.Children.Add(statusBorder);
 
         return panel;
@@ -295,14 +352,14 @@ internal sealed class MainWindow : Window
         return button;
     }
 
-    private static TextBox CreateLensTextBox(string text) => new()
+    private static TextBox CreateValueTextBox(string text) => new()
     {
         Text = text,
         Width = 72,
         HorizontalContentAlignment = HorizontalAlignment.Right
     };
 
-    private static Control CreateLensField(string label, TextBox textBox)
+    private static Control CreateValueField(string label, TextBox textBox)
     {
         var panel = new StackPanel
         {
@@ -340,10 +397,10 @@ internal sealed class MainWindow : Window
 
     private void ApplyLensFromControls()
     {
-        if (!TryParseLensValue(_fovBox.Text, out var fov) ||
-            !TryParseLensValue(_nearBox.Text, out var nearClip) ||
-            !TryParseLensValue(_farBox.Text, out var farClip) ||
-            !TryParseLensValue(_orthographicSizeBox.Text, out var orthographicSize) ||
+        if (!TryParseFloat(_fovBox.Text, out var fov) ||
+            !TryParseFloat(_nearBox.Text, out var nearClip) ||
+            !TryParseFloat(_farBox.Text, out var farClip) ||
+            !TryParseFloat(_orthographicSizeBox.Text, out var orthographicSize) ||
             fov < 1f || fov > 179f ||
             orthographicSize <= 0f ||
             farClip <= nearClip)
@@ -355,7 +412,25 @@ internal sealed class MainWindow : Window
         SendCameraCommand(ViewerCommandCodec.EncodeCameraLens(fov, nearClip, farClip, orthographicSize));
     }
 
-    private static bool TryParseLensValue(string? text, out float value)
+    private void ApplyStreamFromControls()
+    {
+        if (!TryParseFloat(_idleFpsBox.Text, out var idleFps) ||
+            !TryParseFloat(_interactiveFpsBox.Text, out var interactiveFps) ||
+            !int.TryParse(_renderWidthBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) ||
+            !int.TryParse(_renderHeightBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var height) ||
+            idleFps < 1f || idleFps > 120f ||
+            interactiveFps < 1f || interactiveFps > 120f ||
+            width < 64 || width > 4096 ||
+            height < 64 || height > 4096)
+        {
+            _connectionDetail.Text = "Invalid Scene stream values. FPS must be 1-120 and Width/Height must be 64-4096.";
+            return;
+        }
+
+        SendCameraCommand(ViewerCommandCodec.EncodeCameraStreamSettings(idleFps, interactiveFps, width, height));
+    }
+
+    private static bool TryParseFloat(string? text, out float value)
     {
         if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
             float.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
@@ -374,18 +449,56 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        SyncLensText(_fovBox, target.FieldOfView);
-        SyncLensText(_nearBox, target.NearClipPlane);
-        SyncLensText(_farBox, target.FarClipPlane);
-        SyncLensText(_orthographicSizeBox, target.OrthographicSize);
+        SyncFloatText(_fovBox, target.FieldOfView);
+        SyncFloatText(_nearBox, target.NearClipPlane);
+        SyncFloatText(_farBox, target.FarClipPlane);
+        SyncFloatText(_orthographicSizeBox, target.OrthographicSize);
     }
 
-    private static void SyncLensText(TextBox textBox, float value)
+    private void SyncStreamControls(RenderTargetInfo? target)
+    {
+        if (target is null)
+        {
+            return;
+        }
+
+        SyncFloatText(_idleFpsBox, target.IdleFps);
+        SyncFloatText(_interactiveFpsBox, target.InteractiveFps);
+        SyncIntegerText(_renderWidthBox, target.Width);
+        SyncIntegerText(_renderHeightBox, target.Height);
+        _moveSpeedStatus.Text = $"Speed {target.MoveSpeed:0.##} u/s";
+    }
+
+    private static void SyncFloatText(TextBox textBox, float value)
     {
         if (!textBox.IsFocused)
         {
             textBox.Text = value.ToString("0.######", CultureInfo.InvariantCulture);
         }
+    }
+
+    private static void SyncIntegerText(TextBox textBox, int value)
+    {
+        if (!textBox.IsFocused)
+        {
+            textBox.Text = value.ToString(CultureInfo.InvariantCulture);
+        }
+    }
+
+    private void UpdatePerformanceStatus(PerformanceInfo performance)
+    {
+        var snapshotSize = performance.SnapshotBytes <= 0
+            ? "n/a"
+            : performance.SnapshotBytes >= 1024
+                ? $"{performance.SnapshotBytes / 1024.0:0.0} KB"
+                : $"{performance.SnapshotBytes} B";
+
+        _performanceStatus.Text =
+            $"Perf · Render {performance.SceneRenderMs:0.00} ms " +
+            $"(avg {performance.SceneRenderAverageMs:0.00}, max {performance.SceneRenderMaxMs:0.00}) · " +
+            $"Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms " +
+            $"(avg {performance.HierarchyScanAverageMs:0.00}, max {performance.HierarchyScanMaxMs:0.00}) · " +
+            $"JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
     }
 
     private void SendCameraCommand(string command)
@@ -415,6 +528,7 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
                 _expandedInstanceIds.Clear();
+                _performanceStatus.Text = "Perf · waiting for Agent metrics";
                 _sceneHost.SetRenderTarget(null);
                 break;
         }
@@ -424,6 +538,8 @@ internal sealed class MainWindow : Window
     {
         _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
         SyncLensControls(snapshot.RenderTarget);
+        SyncStreamControls(snapshot.RenderTarget);
+        UpdatePerformanceStatus(snapshot.Performance);
         _sceneHost.SetRenderTarget(snapshot.RenderTarget);
         SyncScenes(snapshot.Scenes);
 
@@ -561,9 +677,6 @@ internal sealed class MainWindow : Window
 
     private static void EnsurePlaceholder(HierarchyNode node)
     {
-        // Preserve already-loaded children while a branch is collapsed. They are a useful
-        // local cache and make re-expanding the same branch instant. The next expanded
-        // snapshot will refresh them against the live runtime hierarchy.
         if (node.Children.Any(child => !child.IsPlaceholder))
         {
             return;
