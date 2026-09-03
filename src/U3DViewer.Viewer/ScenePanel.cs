@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -21,6 +22,8 @@ internal sealed class ScenePanel : Grid
     private readonly TextBlock _performanceStatus;
     private readonly TextBlock _moveSpeedStatus;
     private readonly Button _settingsButton;
+    private readonly ToggleButton _perspectiveButton;
+    private readonly ToggleButton _orthographicButton;
     private readonly CheckBox _followPositionBox;
     private readonly CheckBox _followRotationBox;
     private readonly DispatcherTimer _resizeDebounce = new();
@@ -69,55 +72,53 @@ internal sealed class ScenePanel : Grid
         {
             Text = Localization.Translate("Speed 10 u/s"),
             VerticalAlignment = VerticalAlignment.Center,
-            FontWeight = FontWeight.SemiBold
+            FontWeight = FontWeight.SemiBold,
+            Margin = new Thickness(10, 5, 2, 5)
         };
 
         _settingsButton = CreateCommandButton(SettingsLabel(), ShowSettings);
+        _perspectiveButton = CreateProjectionButton(
+            Localization.T("main.perspective"),
+            orthographic: false);
+        _orthographicButton = CreateProjectionButton(
+            Localization.T("main.orthographic"),
+            orthographic: true);
+
         _followPositionBox = new CheckBox
         {
             Content = FollowPositionLabel(),
             IsChecked = _followPosition,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0)
+            Margin = new Thickness(8, 2)
         };
         _followRotationBox = new CheckBox
         {
             Content = FollowRotationLabel(),
             IsChecked = _followRotation,
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2)
         };
         _followPositionBox.IsCheckedChanged += (_, _) => OnFollowChanged();
         _followRotationBox.IsCheckedChanged += (_, _) => OnFollowChanged();
 
-        var commands = new StackPanel
+        var commands = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 6
+            Margin = new Thickness(8, 0, 8, 6)
         };
-        commands.Children.Add(CreateCommandButton(
+        commands.Children.Add(CreateToolbarButton(
             Localization.T("main.resetCamera"),
             () => _sendCommand(ViewerCommandCodec.EncodeCameraReset())));
-        commands.Children.Add(CreateCommandButton(
-            Localization.T("main.perspective"),
-            () => _sendCommand(ViewerCommandCodec.EncodeCameraProjection(false))));
-        commands.Children.Add(CreateCommandButton(
-            Localization.T("main.orthographic"),
-            () => _sendCommand(ViewerCommandCodec.EncodeCameraProjection(true))));
-        commands.Children.Add(CreateCommandButton(Localization.T("main.focusSelected"), FocusSelected));
+        commands.Children.Add(_perspectiveButton);
+        commands.Children.Add(_orthographicButton);
+        commands.Children.Add(CreateToolbarButton(Localization.T("main.focusSelected"), FocusSelected));
+        _settingsButton.Margin = new Thickness(3);
         commands.Children.Add(_settingsButton);
         commands.Children.Add(_followPositionBox);
         commands.Children.Add(_followRotationBox);
-
-        var toolbar = new Grid
-        {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            Margin = new Thickness(10, 0, 10, 8)
-        };
-        toolbar.Children.Add(commands);
-        Grid.SetColumn(_moveSpeedStatus, 1);
-        toolbar.Children.Add(_moveSpeedStatus);
-        Grid.SetRow(toolbar, 1);
-        Children.Add(toolbar);
+        commands.Children.Add(_moveSpeedStatus);
+        Grid.SetRow(commands, 1);
+        Children.Add(commands);
 
         _sceneStatus = new TextBlock
         {
@@ -183,6 +184,7 @@ internal sealed class ScenePanel : Grid
         if (target is not null)
         {
             _moveSpeedStatus.Text = Localization.Translate($"Speed {target.MoveSpeed:0.##} u/s");
+            UpdateProjectionControls(target.Orthographic);
         }
 
         UpdatePerformanceStatus(performance);
@@ -217,6 +219,8 @@ internal sealed class ScenePanel : Grid
         _requestedAutoHeight = 0;
         _resizeDebounce.Stop();
         _performanceStatus.Text = Localization.T("main.perfWaiting");
+        _perspectiveButton.IsChecked = false;
+        _orthographicButton.IsChecked = false;
         _sceneHost.SetRenderTarget(null);
     }
 
@@ -230,6 +234,8 @@ internal sealed class ScenePanel : Grid
     private void OnLanguageChanged()
     {
         _settingsButton.Content = SettingsLabel();
+        _perspectiveButton.Content = Localization.T("main.perspective");
+        _orthographicButton.Content = Localization.T("main.orthographic");
         _followPositionBox.Content = FollowPositionLabel();
         _followRotationBox.Content = FollowRotationLabel();
         if (_latestTarget is not null)
@@ -253,6 +259,18 @@ internal sealed class ScenePanel : Grid
         {
             _sendCommand(ViewerCommandCodec.EncodeCameraFollowTransform(_followPosition, _followRotation));
         }
+    }
+
+    private void SetProjection(bool orthographic)
+    {
+        UpdateProjectionControls(orthographic);
+        _sendCommand(ViewerCommandCodec.EncodeCameraProjection(orthographic));
+    }
+
+    private void UpdateProjectionControls(bool orthographic)
+    {
+        _perspectiveButton.IsChecked = !orthographic;
+        _orthographicButton.IsChecked = orthographic;
     }
 
     private void FocusSelected()
@@ -465,6 +483,24 @@ internal sealed class ScenePanel : Grid
         _performanceStatus.Text = Localization.IsChinese
             ? $"性能 · 游戏 {performance.GameFps:0.0} FPS · Scene {performance.SceneFps:0.0} FPS · 渲染 {performance.SceneRenderMs:0.00} ms · 层级 {performance.HierarchyNodes} 节点 / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}"
             : $"Perf · Game {performance.GameFps:0.0} FPS · Scene {performance.SceneFps:0.0} FPS · Render {performance.SceneRenderMs:0.00} ms · Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms · JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
+    }
+
+    private ToggleButton CreateProjectionButton(string text, bool orthographic)
+    {
+        var button = new ToggleButton
+        {
+            Content = text,
+            Margin = new Thickness(3)
+        };
+        button.Click += (_, _) => SetProjection(orthographic);
+        return button;
+    }
+
+    private static Button CreateToolbarButton(string text, Action action)
+    {
+        var button = CreateCommandButton(text, action);
+        button.Margin = new Thickness(3);
+        return button;
     }
 
     private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
