@@ -25,12 +25,17 @@
 
   <Target Name="CopyLocalNativeBridge" AfterTargets="Build">
     <PropertyGroup>
-      <NativeBridgePath>$(MSBuildProjectDirectory)\..\..\build\native\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgePath>
+      <NativeBridgeX64Path>$(MSBuildProjectDirectory)\..\..\build\native\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgeX64Path>
+      <NativeBridgeX86Path>$(MSBuildProjectDirectory)\..\..\build\native-x86\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgeX86Path>
     </PropertyGroup>
-    <Copy SourceFiles="$(NativeBridgePath)"
-          DestinationFolder="$(OutputPath)"
+    <Copy SourceFiles="$(NativeBridgeX64Path)"
+          DestinationFiles="$(OutputPath)U3DViewer.NativeBridge.dll"
           SkipUnchangedFiles="true"
-          Condition="Exists('$(NativeBridgePath)')" />
+          Condition="Exists('$(NativeBridgeX64Path)')" />
+    <Copy SourceFiles="$(NativeBridgeX86Path)"
+          DestinationFiles="$(OutputPath)U3DViewer.NativeBridge.x86.dll"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(NativeBridgeX86Path)')" />
   </Target>
 
   <Target Name="CopyAgentBuilderSources" AfterTargets="Build">
