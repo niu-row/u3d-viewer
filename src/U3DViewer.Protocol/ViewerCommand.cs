@@ -68,23 +68,22 @@ public struct ViewerCommand
 public static class ViewerCommandCodec
 {
     public static string EncodeCameraMove(float forward, float right, float up, float deltaSeconds) =>
-        string.Join("\t", "camera.move", F(forward), F(right), F(up), F(deltaSeconds));
+        Join("camera.move", F(forward), F(right), F(up), F(deltaSeconds));
 
     public static string EncodeCameraLook(float yawDelta, float pitchDelta) =>
-        string.Join("\t", "camera.look", F(yawDelta), F(pitchDelta));
+        Join("camera.look", F(yawDelta), F(pitchDelta));
 
     public static string EncodeCameraSpeed(float unitsPerSecond) =>
-        string.Join("\t", "camera.speed", F(unitsPerSecond));
+        Join("camera.speed", F(unitsPerSecond));
 
     public static string EncodeCameraProjection(bool orthographic) =>
         $"camera.projection\t{(orthographic ? "orthographic" : "perspective")}";
 
     public static string EncodeCameraLens(float fieldOfView, float nearClip, float farClip, float orthographicSize) =>
-        string.Join("\t", "camera.lens", F(fieldOfView), F(nearClip), F(farClip), F(orthographicSize));
+        Join("camera.lens", F(fieldOfView), F(nearClip), F(farClip), F(orthographicSize));
 
     public static string EncodeCameraStreamSettings(float idleFps, float interactiveFps, int width, int height) =>
-        string.Join(
-            "\t",
+        Join(
             "camera.stream",
             F(idleFps),
             F(interactiveFps),
@@ -92,14 +91,13 @@ public static class ViewerCommandCodec
             height.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeCameraCulling(SceneCullingMode mode, int mask) =>
-        string.Join(
-            "\t",
+        Join(
             "camera.culling",
             ((int)mode).ToString(CultureInfo.InvariantCulture),
             mask.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeCameraFollowTransform(bool position, bool rotation) =>
-        string.Join("\t", "camera.follow", position ? "1" : "0", rotation ? "1" : "0");
+        Join("camera.follow", position ? "1" : "0", rotation ? "1" : "0");
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -109,14 +107,13 @@ public static class ViewerCommandCodec
         $"camera.visibility\t{(visible ? "1" : "0")}";
 
     public static string EncodeCameraFocus(int instanceId) =>
-        string.Join("\t", "camera.focus", instanceId.ToString(CultureInfo.InvariantCulture));
+        Join("camera.focus", instanceId.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeSelectObject(int instanceId) =>
-        string.Join("\t", "selection.set", instanceId.ToString(CultureInfo.InvariantCulture));
+        Join("selection.set", instanceId.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeHierarchyExpanded(int instanceId, bool expanded) =>
-        string.Join(
-            "\t",
+        Join(
             "hierarchy.expanded",
             instanceId.ToString(CultureInfo.InvariantCulture),
             expanded ? "1" : "0");
@@ -265,6 +262,8 @@ public static class ViewerCommandCodec
 
         return true;
     }
+
+    private static string Join(params string[] parts) => string.Join("\t", parts);
 
     private static string F(float value) => value.ToString("R", CultureInfo.InvariantCulture);
 
