@@ -7,6 +7,8 @@ using Avalonia.Data;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
 using U3DViewer.Protocol;
 
@@ -15,14 +17,20 @@ namespace U3DViewer.Viewer;
 internal sealed class MainWindow : Window
 {
     private readonly ViewerConnection _connection = new();
+    private readonly NativeSceneTextureReader _sceneReader = new();
+    private readonly DispatcherTimer _sceneTimer = new();
     private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
     private readonly TreeView _hierarchy;
     private readonly TextBlock _connectionStatus;
     private readonly TextBlock _snapshotStatus;
     private readonly TextBlock _connectionDetail;
     private readonly StackPanel _inspectorContent;
+    private readonly Image _sceneImage;
+    private readonly TextBlock _sceneStatus;
 
     private HierarchyNode? _selectedNode;
+    private WriteableBitmap? _sceneBitmap;
+    private int _sceneDxgiFormat;
 
     public MainWindow()
     {
@@ -69,14 +77,48 @@ internal sealed class MainWindow : Window
         };
         RenderEmptyInspector();
 
+        _sceneImage = new Image
+        {
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsVisible = false
+        };
+
+        _sceneStatus = new TextBlock
+        {
+            Text = "Waiting for the target game's Scene render target...",
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = 560,
+            Margin = new Thickness(14)
+        };
+
+        _sceneTimer.Interval = TimeSpan.FromMilliseconds(33);
+        _sceneTimer.Tick += (_, _) => RefreshSceneFrame();
+
         Content = BuildLayout();
 
         _connection.StateChanged += state => Dispatcher.UIThread.Post(() => UpdateConnectionState(state));
         _connection.SnapshotReceived += snapshot => Dispatcher.UIThread.Post(() => ApplySnapshot(snapshot));
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
-        Opened += (_, _) => _connection.Start();
-        Closed += (_, _) => _ = _connection.DisposeAsync().AsTask();
+        Opened += (_, _) =>
+        {
+            _connection.Start();
+            _sceneTimer.Start();
+        };
+
+        Closed += (_, _) =>
+        {
+            _sceneTimer.Stop();
+            _sceneReader.Dispose();
+            _sceneBitmap?.Dispose();
+            _sceneBitmap = null;
+            _ = _connection.DisposeAsync().AsTask();
+        };
     }
 
     private Control BuildLayout()
@@ -185,26 +227,17 @@ internal sealed class MainWindow : Window
         Grid.SetRow(toolbar, 1);
         panel.Children.Add(toolbar);
 
-        var help = new StackPanel
+        var sceneSurface = new Grid();
+        sceneSurface.Children.Add(_sceneImage);
+
+        var statusBorder = new Border
         {
-            Spacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 520
+            Background = new SolidColorBrush(Color.FromArgb(180, 24, 24, 24)),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Child = _sceneStatus
         };
-        help.Children.Add(new TextBlock
-        {
-            Text = "Runtime Scene Camera control channel",
-            FontSize = 18,
-            FontWeight = FontWeight.SemiBold,
-            HorizontalAlignment = HorizontalAlignment.Center
-        });
-        help.Children.Add(new TextBlock
-        {
-            Text = "Click this area to focus it. Use W/S to move forward/back, A/D to strafe, Q/E to move down/up, and arrow keys to look around. The camera exists inside the target game; M4 will stream its D3D11 render target into this panel.",
-            TextWrapping = TextWrapping.Wrap,
-            TextAlignment = TextAlignment.Center
-        });
+        sceneSurface.Children.Add(statusBorder);
 
         var inputSurface = new Border
         {
@@ -212,7 +245,8 @@ internal sealed class MainWindow : Window
             Margin = new Thickness(10),
             BorderBrush = Brushes.Gray,
             BorderThickness = new Thickness(1),
-            Child = help
+            Background = Brushes.Black,
+            Child = sceneSurface
         };
         inputSurface.PointerPressed += (_, _) => inputSurface.Focus();
         inputSurface.KeyDown += OnSceneKeyDown;
@@ -322,12 +356,14 @@ internal sealed class MainWindow : Window
             case ConnectionState.Connected:
                 _connectionStatus.Text = "● Connected";
                 _connectionStatus.Foreground = Brushes.Green;
-                _connectionDetail.Text = "Receiving hierarchy; Scene Camera commands are available";
+                _connectionDetail.Text = "Receiving hierarchy and Scene Camera state";
                 break;
             default:
                 _connectionStatus.Text = "● Disconnected";
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
+                _sceneReader.Reset();
+                _sceneStatus.Text = "Waiting for the target game's Scene render target...";
                 break;
         }
     }
@@ -335,11 +371,81 @@ internal sealed class MainWindow : Window
     private void ApplySnapshot(SceneSnapshot snapshot)
     {
         _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
+        UpdateRenderTarget(snapshot.RenderTarget);
         SyncScenes(snapshot.Scenes);
 
         if (_selectedNode?.GameObject is not null)
         {
             RenderInspector(_selectedNode.GameObject);
+        }
+    }
+
+    private void UpdateRenderTarget(RenderTargetInfo? target)
+    {
+        if (target is null || !target.Available)
+        {
+            _sceneStatus.Text = target?.Status ?? "Agent did not publish Scene render target information.";
+            return;
+        }
+
+        if (!_sceneReader.Open(target))
+        {
+            _sceneStatus.Text = _sceneReader.LastStatus;
+            return;
+        }
+
+        if (_sceneBitmap is null ||
+            _sceneBitmap.PixelSize.Width != target.Width ||
+            _sceneBitmap.PixelSize.Height != target.Height ||
+            _sceneDxgiFormat != target.DxgiFormat)
+        {
+            _sceneBitmap?.Dispose();
+            _sceneDxgiFormat = target.DxgiFormat;
+
+            var pixelFormat = target.DxgiFormat switch
+            {
+                87 or 91 => PixelFormats.Bgra8888,
+                _ => PixelFormats.Rgba8888
+            };
+
+            _sceneBitmap = new WriteableBitmap(
+                new PixelSize(target.Width, target.Height),
+                new Vector(96, 96),
+                pixelFormat,
+                AlphaFormat.Opaque);
+            _sceneImage.Source = _sceneBitmap;
+        }
+
+        _sceneStatus.Text = $"{target.Width}×{target.Height} · DXGI {target.DxgiFormat} · click Scene View, then use WASD/QE + arrow keys";
+    }
+
+    private void RefreshSceneFrame()
+    {
+        var bitmap = _sceneBitmap;
+        if (bitmap is null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var framebuffer = bitmap.Lock();
+            if (_sceneReader.TryRead(
+                    framebuffer.Address,
+                    framebuffer.RowBytes,
+                    framebuffer.Size.Height,
+                    out var width,
+                    out var height,
+                    out var dxgiFormat))
+            {
+                _sceneImage.IsVisible = true;
+                _sceneStatus.Text = $"LIVE · {width}×{height} · DXGI {dxgiFormat} · WASD/QE + arrow keys";
+                _sceneImage.InvalidateVisual();
+            }
+        }
+        catch (Exception ex)
+        {
+            _sceneStatus.Text = $"Scene frame update failed: {ex.Message}";
         }
     }
 
@@ -504,10 +610,10 @@ internal sealed class MainWindow : Window
         AddInspectorLine($"Tag: {(string.IsNullOrWhiteSpace(gameObject.Tag) ? "<none>" : gameObject.Tag)}");
 
         AddInspectorHeading("Transform", 15);
-        AddInspectorLine($"Position:      {FormatVector(gameObject.Transform.Position)}");
-        AddInspectorLine($"Local Position:{FormatVector(gameObject.Transform.LocalPosition)}");
-        AddInspectorLine($"Euler Angles:  {FormatVector(gameObject.Transform.EulerAngles)}");
-        AddInspectorLine($"Local Scale:   {FormatVector(gameObject.Transform.LocalScale)}");
+        AddInspectorLine($"Position:       {FormatVector(gameObject.Transform.Position)}");
+        AddInspectorLine($"Local Position: {FormatVector(gameObject.Transform.LocalPosition)}");
+        AddInspectorLine($"Euler Angles:   {FormatVector(gameObject.Transform.EulerAngles)}");
+        AddInspectorLine($"Local Scale:    {FormatVector(gameObject.Transform.LocalScale)}");
 
         AddInspectorHeading($"Components ({gameObject.Components.Length})", 15);
         if (gameObject.Components.Length == 0)
