@@ -27,7 +27,7 @@ internal static class GameAutomation
             return false;
         }
 
-        if (!AgentBuilder.CanBuild(out reason))
+        if (!AgentBuilder.CanBuild(executablePath, backend, out reason))
         {
             return false;
         }
