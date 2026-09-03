@@ -1,5 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+#if !LEGACY_MONO
+using System.Threading.Tasks;
+#endif
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
@@ -21,12 +26,14 @@ public sealed class Plugin : BaseUnityPlugin
     private const int InteractiveHierarchyNodesPerFrame = 256;
     private const double InteractiveHierarchyScanBudgetMilliseconds = 2.0;
 
-    private readonly HashSet<int> _expandedInstanceIds = new();
+    private readonly HashSet<int> _expandedInstanceIds = new HashSet<int>();
     private PipeServer? _pipeServer;
     private SceneCameraController? _sceneCamera;
     private SceneCullingController? _sceneCulling;
     private SceneScanner.SceneScanSession? _sceneScan;
+#if !LEGACY_MONO
     private Task<SerializedSnapshot>? _snapshotSerialization;
+#endif
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
@@ -60,13 +67,19 @@ public sealed class Plugin : BaseUnityPlugin
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
         _sceneScan = null;
+#if !LEGACY_MONO
         _snapshotSerialization = null;
+#endif
         _expandedInstanceIds.Clear();
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
         _interactiveHierarchyRefresh = false;
         ResetPerformanceMetrics();
+#if LEGACY_MONO
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}.");
+#else
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
+#endif
     }
 
     private void Update()
@@ -159,12 +172,14 @@ public sealed class Plugin : BaseUnityPlugin
             }
         }
 
+#if !LEGACY_MONO
         PublishCompletedSerialization(pipeServer);
 
         if (_snapshotSerialization is not null)
         {
             return;
         }
+#endif
 
         var now = Time.unscaledTime;
         if (_sceneScan is null)
@@ -225,7 +240,14 @@ public sealed class Plugin : BaseUnityPlugin
             _currentScanNodes = 0;
             _currentScanMs = 0;
 
+#if LEGACY_MONO
+            var serialized = SerializeSnapshot(snapshot);
+            _lastSerializeMs = serialized.SerializeMs;
+            _lastSnapshotBytes = serialized.Bytes;
+            pipeServer.Publish(serialized.Json);
+#else
             _snapshotSerialization = Task.Run(() => SerializeSnapshot(snapshot));
+#endif
         }
         catch (Exception ex)
         {
@@ -238,6 +260,7 @@ public sealed class Plugin : BaseUnityPlugin
         }
     }
 
+#if !LEGACY_MONO
     private void PublishCompletedSerialization(PipeServer pipeServer)
     {
         var task = _snapshotSerialization;
@@ -261,6 +284,7 @@ public sealed class Plugin : BaseUnityPlugin
             LogSource.LogError($"Failed to serialize scene snapshot: {task.Exception?.GetBaseException().Message}");
         }
     }
+#endif
 
     private static SerializedSnapshot SerializeSnapshot(SceneSnapshot snapshot)
     {
@@ -270,7 +294,7 @@ public sealed class Plugin : BaseUnityPlugin
         return new SerializedSnapshot(json, Encoding.UTF8.GetByteCount(json), serializeMs);
     }
 
-    private PerformanceInfo BuildPerformanceInfo() => new()
+    private PerformanceInfo BuildPerformanceInfo() => new PerformanceInfo
     {
         GameFps = _gameFps,
         HierarchyNodes = _lastScanNodes,
@@ -317,7 +341,9 @@ public sealed class Plugin : BaseUnityPlugin
     private void RestartHierarchyScan()
     {
         _sceneScan = null;
+#if !LEGACY_MONO
         _snapshotSerialization = null;
+#endif
         _currentScanNodes = 0;
         _currentScanMs = 0;
         _nextSnapshotAt = 0f;
@@ -326,7 +352,9 @@ public sealed class Plugin : BaseUnityPlugin
     private void ResetSnapshotState()
     {
         _sceneScan = null;
+#if !LEGACY_MONO
         _snapshotSerialization = null;
+#endif
         _currentScanNodes = 0;
         _currentScanMs = 0;
     }
@@ -374,8 +402,8 @@ public sealed class Plugin : BaseUnityPlugin
             SerializeMs = serializeMs;
         }
 
-        public string Json { get; }
-        public int Bytes { get; }
-        public double SerializeMs { get; }
+        public string Json { get; private set; }
+        public int Bytes { get; private set; }
+        public double SerializeMs { get; private set; }
     }
 }
