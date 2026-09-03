@@ -18,6 +18,8 @@ internal sealed class SourceCameraCaptureController : IDisposable
     private const int MaxRenderDimension = 4096;
     private const string ViewerCameraObjectName = "__U3DViewerCamera";
 
+    private readonly System.Action<ScriptableRenderContext, Camera> _managedEndCameraRenderingHandler;
+    private readonly Il2CppSystem.Action<ScriptableRenderContext, Camera> _endCameraRenderingHandler;
     private RenderTexture? _renderTexture;
     private CommandBuffer? _captureCommand;
     private Camera? _builtInAttachedCamera;
@@ -51,7 +53,10 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     public SourceCameraCaptureController()
     {
-        RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+        _managedEndCameraRenderingHandler = OnEndCameraRendering;
+        _endCameraRenderingHandler =
+            (Il2CppSystem.Action<ScriptableRenderContext, Camera>)_managedEndCameraRenderingHandler;
+        RenderPipelineManager.endCameraRendering += _endCameraRenderingHandler;
     }
 
     public bool Enabled => _enabled;
@@ -551,7 +556,7 @@ internal sealed class SourceCameraCaptureController : IDisposable
 
     public void Dispose()
     {
-        RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+        RenderPipelineManager.endCameraRendering -= _endCameraRenderingHandler;
         DetachBuiltInCommandBuffer();
         ResetBridge();
         ReleaseRenderTexture();
