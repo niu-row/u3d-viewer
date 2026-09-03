@@ -58,10 +58,14 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Awake()
     {
-        // Startup must remain passive. In particular, do not touch Application state,
-        // layer metadata, cameras, RenderTextures, or the native bridge before a real
-        // Viewer connection exists. Older Unity/Mono players can be sensitive to Unity
-        // API calls made this early in startup.
+        // BepInEx is configured to enter old Unity players through a delayed MonoBehaviour
+        // entrypoint, so it is safe to keep the game ticking while the Viewer owns focus.
+        // Keep all heavier Unity state (layers, cameras, RenderTextures and native bridge)
+        // lazy until a real Viewer connection exists.
+        _originalRunInBackground = Application.runInBackground;
+        _runInBackgroundCaptured = true;
+        Application.runInBackground = true;
+
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
         _sceneCamera = null;
         _sceneCulling = null;
@@ -75,13 +79,12 @@ public sealed class Plugin : BaseUnityPlugin
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
         _interactiveHierarchyRefresh = false;
-        _runInBackgroundCaptured = false;
         _viewerSessionActive = false;
         ResetPerformanceMetrics();
 #if LEGACY_MONO
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}. Passive until Viewer connects.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}. Background execution enabled; Scene resources remain passive until Viewer connects.");
 #else
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Passive until Viewer connects.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution enabled; Scene resources remain passive until Viewer connects.");
 #endif
     }
 
@@ -106,6 +109,8 @@ public sealed class Plugin : BaseUnityPlugin
             BeginViewerSession();
         }
 
+        // Some games rewrite this setting at runtime. Keep it asserted while the Agent is
+        // loaded so Viewer focus/minimize changes cannot stall the Unity main thread.
         if (!Application.runInBackground)
         {
             Application.runInBackground = true;
@@ -285,10 +290,6 @@ public sealed class Plugin : BaseUnityPlugin
             return;
         }
 
-        _originalRunInBackground = Application.runInBackground;
-        _runInBackgroundCaptured = true;
-        Application.runInBackground = true;
-
         _sceneCamera = new SceneCameraController();
         _sceneCulling = new SceneCullingController();
         _viewerSessionActive = true;
@@ -309,15 +310,8 @@ public sealed class Plugin : BaseUnityPlugin
         _sceneCulling = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
-
-        if (_runInBackgroundCaptured)
-        {
-            Application.runInBackground = _originalRunInBackground;
-            _runInBackgroundCaptured = false;
-        }
-
         _viewerSessionActive = false;
-        LogSource.LogInfo("Viewer session deactivated; game state restored.");
+        LogSource.LogInfo("Viewer session deactivated; Scene resources released.");
     }
 
     private void ResetDisconnectedState()
@@ -449,6 +443,12 @@ public sealed class Plugin : BaseUnityPlugin
         EndViewerSession();
         _pipeServer?.Dispose();
         _pipeServer = null;
+
+        if (_runInBackgroundCaptured)
+        {
+            Application.runInBackground = _originalRunInBackground;
+            _runInBackgroundCaptured = false;
+        }
     }
 
     private sealed class SerializedSnapshot
