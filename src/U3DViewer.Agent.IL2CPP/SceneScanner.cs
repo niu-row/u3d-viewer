@@ -10,26 +10,52 @@ internal static class SceneScanner
 {
     public static SceneScanSession Begin(long sequence, int selectedInstanceId, HashSet<int> expandedInstanceIds)
     {
-        var scenes = new SceneInfo[SceneManager.sceneCount];
+        var scenes = new List<SceneInfo>();
         var pending = new Queue<SceneScanWorkItem>();
+        var sceneCount = SceneManager.sceneCount;
 
-        for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+        for (var sceneIndex = 0; sceneIndex < sceneCount; sceneIndex++)
         {
-            var scene = SceneManager.GetSceneAt(sceneIndex);
-            var roots = scene.GetRootGameObjects();
-            var rootInfos = new GameObjectInfo[roots.Length];
-
-            scenes[sceneIndex] = new SceneInfo
+            try
             {
-                BuildIndex = scene.buildIndex,
-                Name = scene.name ?? string.Empty,
-                IsLoaded = scene.isLoaded,
-                Roots = rootInfos
-            };
+                var scene = SceneManager.GetSceneAt(sceneIndex);
+                var isLoaded = scene.isLoaded;
+                var roots = Array.Empty<GameObject>();
 
-            for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+                if (isLoaded)
+                {
+                    try
+                    {
+                        roots = scene.GetRootGameObjects();
+                    }
+                    catch (Exception)
+                    {
+                        // Additive scenes can remain visible through SceneManager for a short
+                        // window while their native scene is already unloading (or not fully
+                        // loaded yet). One transient scene must not abort the entire snapshot.
+                        isLoaded = false;
+                        roots = Array.Empty<GameObject>();
+                    }
+                }
+
+                var rootInfos = new GameObjectInfo[roots.Length];
+                scenes.Add(new SceneInfo
+                {
+                    BuildIndex = scene.buildIndex,
+                    Name = scene.name ?? string.Empty,
+                    IsLoaded = isLoaded,
+                    Roots = rootInfos
+                });
+
+                for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+                {
+                    pending.Enqueue(new SceneScanWorkItem(roots[rootIndex], rootInfos, rootIndex));
+                }
+            }
+            catch (Exception)
             {
-                pending.Enqueue(new SceneScanWorkItem(roots[rootIndex], rootInfos, rootIndex));
+                // SceneManager can change between reading sceneCount and GetSceneAt while
+                // additive content is loading/unloading. Retry from a fresh list next tick.
             }
         }
 
@@ -38,7 +64,7 @@ internal static class SceneScanner
             {
                 Sequence = sequence,
                 UnixTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                Scenes = scenes
+                Scenes = scenes.ToArray()
             },
             selectedInstanceId,
             expandedInstanceIds,
