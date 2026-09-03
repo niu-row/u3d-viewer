@@ -42,6 +42,8 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 
     private static readonly FieldInfo? FreeCameraField =
         typeof(SceneCameraController).GetField("_camera", InstancePrivate);
+    private static readonly FieldInfo? FreeTransportTextureField =
+        typeof(SceneCameraController).GetField("_transportTexture", InstancePrivate);
     private static readonly FieldInfo? FreeViewerVisibleField =
         typeof(SceneCameraController).GetField("_viewerVisible", InstancePrivate);
     private static readonly FieldInfo? FreeBridgeReadyField =
@@ -216,9 +218,10 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         }
 
         var camera = FreeCameraField?.GetValue(controller) as Camera;
+        var transportTexture = FreeTransportTextureField?.GetValue(controller) as RenderTexture;
         var viewerVisible = FreeViewerVisibleField?.GetValue(controller) is bool visible && visible;
         var bridgeReady = FreeBridgeReadyField?.GetValue(controller) is bool ready && ready;
-        if (camera is null || !viewerVisible || !bridgeReady || !camera.enabled || camera.targetTexture is null)
+        if (camera is null || transportTexture is null || !viewerVisible || !bridgeReady || !camera.enabled || camera.targetTexture is null)
         {
             return;
         }
@@ -258,8 +261,10 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         var started = Stopwatch.GetTimestamp();
         try
         {
-            // The active SRP has already rendered the enabled U3DViewer Camera into its
-            // targetTexture during this frame. Publish that completed RenderTexture now.
+            // Mirror the proven direct-capture submission model: write the completed free
+            // Camera image into the exact RenderTexture owned by NativeBridge, then enqueue
+            // the plugin event immediately behind that GPU write.
+            Graphics.Blit(camera.targetTexture, transportTexture);
             GL.IssuePluginEvent(renderEvent, copyEventId);
 
             var elapsedMs =
@@ -271,7 +276,7 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
             var pipelineName = pipeline?.GetType().FullName ?? pipeline?.GetType().Name ?? "unknown SRP";
             FreeRenderStatusField?.SetValue(
                 controller,
-                $"SRP free Scene Camera is rendered by {pipelineName}; shared frame published at end-of-frame.");
+                $"SRP free Scene Camera is rendered by {pipelineName}; frame copied into the dedicated NativeBridge transport target at end-of-frame.");
         }
         catch (Exception ex)
         {
