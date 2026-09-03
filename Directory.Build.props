@@ -5,5 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Deterministic>true</Deterministic>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- This file is part of the runtime Agent compatibility fingerprint.
+         Bump this value when a release must invalidate previously built Agent caches. -->
+    <U3DViewerAgentCompatibilitySchema>3</U3DViewerAgentCompatibilitySchema>
   </PropertyGroup>
 </Project>
