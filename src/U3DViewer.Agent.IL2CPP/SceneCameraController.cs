@@ -12,6 +12,11 @@ internal sealed class SceneCameraController : IDisposable
     private const float IdleRenderInterval = 1f / 15f;
     private const float InteractiveRenderInterval = 1f / 30f;
     private const float InteractiveHoldSeconds = 0.2f;
+    private const float DefaultPerspectiveFov = 60f;
+    private const float MinPerspectiveNear = 0.03f;
+    private const float MinPerspectiveFov = 5f;
+    private const float MaxPerspectiveFov = 120f;
+    private const float DefaultPerspectiveFar = 10000f;
 
     private GameObject? _cameraObject;
     private Camera? _camera;
@@ -19,7 +24,6 @@ internal sealed class SceneCameraController : IDisposable
     private float _moveSpeed = 10f;
     private float _nextRenderAt;
     private float _interactiveUntil;
-    private bool _cameraRenderPending;
     private bool _bridgeReady;
     private IntPtr _renderEvent;
     private int _copyEventId;
@@ -27,7 +31,8 @@ internal sealed class SceneCameraController : IDisposable
     private ulong _adapterLuid;
     private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
-    private string _sourceCameraName = string.Empty;
+    private string _sourceProjectionInfo = "Source Camera: unavailable";
+    private float _preferredOrthographicSize = 5f;
     private string _renderStatus = "Scene Camera has not initialized yet.";
 
     public void Apply(ViewerCommand command)
@@ -62,7 +67,7 @@ internal sealed class SceneCameraController : IDisposable
                 _moveSpeed = Mathf.Clamp(command.Value, 0.1f, 1000f);
                 break;
             case ViewerCommandKind.CameraProjection:
-                camera.orthographic = command.Flag;
+                ApplyProjection(camera, command.Flag);
                 BoostInteractiveRender();
                 break;
             case ViewerCommandKind.CameraReset:
@@ -85,43 +90,24 @@ internal sealed class SceneCameraController : IDisposable
     public void TickRender()
     {
         EnsureCamera();
-        var camera = _camera;
-        if (!_bridgeReady || camera is null)
+        var now = Time.unscaledTime;
+        if (!_bridgeReady || _camera is null || now < _nextRenderAt)
         {
             return;
         }
 
+        var interval = now < _interactiveUntil
+            ? InteractiveRenderInterval
+            : IdleRenderInterval;
+        _nextRenderAt = now + interval;
+
         try
         {
-            // Camera.Render() bypasses/does not reliably participate in SRP (URP/HDRP).
-            // Pulse Camera.enabled for one normal Unity render-loop frame instead. On the
-            // following Update the RenderTexture contains a fully completed frame, so the
-            // native copy event can safely publish it to the Viewer.
-            if (_cameraRenderPending)
-            {
-                camera.enabled = false;
-                GL.IssuePluginEvent(_renderEvent, _copyEventId);
-                _cameraRenderPending = false;
-            }
-
-            var now = Time.unscaledTime;
-            if (now < _nextRenderAt)
-            {
-                return;
-            }
-
-            var interval = now < _interactiveUntil
-                ? InteractiveRenderInterval
-                : IdleRenderInterval;
-            _nextRenderAt = now + interval;
-
-            camera.enabled = true;
-            _cameraRenderPending = true;
+            _camera.Render();
+            GL.IssuePluginEvent(_renderEvent, _copyEventId);
         }
         catch (Exception ex)
         {
-            camera.enabled = false;
-            _cameraRenderPending = false;
             _bridgeReady = false;
             _renderStatus = $"Scene render failed: {ex.Message}";
         }
@@ -130,6 +116,13 @@ internal sealed class SceneCameraController : IDisposable
     public RenderTargetInfo GetRenderTargetInfo()
     {
         EnsureCamera();
+        var camera = _camera;
+        var projection = camera is null
+            ? "Scene Camera unavailable"
+            : camera.orthographic
+                ? $"Scene Orthographic size={camera.orthographicSize:0.###}, near={camera.nearClipPlane:0.###}, far={camera.farClipPlane:0.###}"
+                : $"Scene Perspective FOV={camera.fieldOfView:0.###}, near={camera.nearClipPlane:0.###}, far={camera.farClipPlane:0.###}";
+
         return new RenderTargetInfo
         {
             Available = _bridgeReady,
@@ -139,7 +132,7 @@ internal sealed class SceneCameraController : IDisposable
             DxgiFormat = _dxgiFormat,
             AdapterLuid = _adapterLuid,
             AdapterName = _adapterName,
-            Status = _renderStatus
+            Status = $"{_renderStatus} {_sourceProjectionInfo} -> {projection}."
         };
     }
 
@@ -156,8 +149,9 @@ internal sealed class SceneCameraController : IDisposable
         _camera = _cameraObject.AddComponent<Camera>();
         _camera.enabled = false;
         _camera.orthographic = false;
-        _camera.nearClipPlane = 0.03f;
-        _camera.farClipPlane = 10000f;
+        _camera.nearClipPlane = MinPerspectiveNear;
+        _camera.farClipPlane = DefaultPerspectiveFar;
+        _camera.fieldOfView = DefaultPerspectiveFov;
 
         _renderTexture = new RenderTexture(RenderWidth, RenderHeight, 24, RenderTextureFormat.ARGB32)
         {
@@ -206,7 +200,7 @@ internal sealed class SceneCameraController : IDisposable
             _adapterName = SystemInfo.graphicsDeviceName ?? string.Empty;
             _bridgeReady = _renderEvent != IntPtr.Zero;
             _renderStatus = _bridgeReady
-                ? $"D3D11 shared Scene target ready on {DisplayAdapterName(_adapterName)}. Source Camera: {DisplayCameraName(_sourceCameraName)}. Unity render-loop capture."
+                ? $"D3D11 shared Scene render target is ready on {DisplayAdapterName(_adapterName)}."
                 : "NativeBridge did not return a render event callback.";
         }
         catch (DllNotFoundException)
@@ -233,9 +227,6 @@ internal sealed class SceneCameraController : IDisposable
     private static string DisplayAdapterName(string value) =>
         string.IsNullOrWhiteSpace(value) ? "an unknown GPU" : value;
 
-    private static string DisplayCameraName(string value) =>
-        string.IsNullOrWhiteSpace(value) ? "fallback camera" : value;
-
     private void CopyFromGameCamera()
     {
         var camera = _camera;
@@ -244,67 +235,84 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
-        camera.orthographic = false;
-        var source = FindSourceCamera(camera);
-        if (source is null)
+        var source = Camera.main;
+        if (source is null || source == camera)
         {
-            _sourceCameraName = string.Empty;
+            _sourceProjectionInfo = "Source Camera: unavailable";
+            _preferredOrthographicSize = 5f;
             camera.transform.position = new Vector3(0f, 2f, -5f);
             camera.transform.rotation = Quaternion.identity;
             camera.cullingMask = -1;
+            camera.fieldOfView = DefaultPerspectiveFov;
+            camera.nearClipPlane = MinPerspectiveNear;
+            camera.farClipPlane = DefaultPerspectiveFar;
+            camera.orthographicSize = _preferredOrthographicSize;
+            camera.orthographic = false;
             return;
         }
 
-        _sourceCameraName = source.name ?? source.gameObject.name ?? string.Empty;
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
-        camera.fieldOfView = source.fieldOfView;
-        camera.nearClipPlane = source.nearClipPlane;
-        camera.farClipPlane = source.farClipPlane;
         camera.clearFlags = source.clearFlags;
         camera.backgroundColor = source.backgroundColor;
         camera.cullingMask = source.cullingMask;
-        camera.depth = source.depth;
+
+        _preferredOrthographicSize = Mathf.Max(0.01f, source.orthographicSize);
+        camera.orthographicSize = _preferredOrthographicSize;
+
+        if (source.orthographic)
+        {
+            // FOV and especially near-clip settings on a 2D/orthographic game camera are
+            // not necessarily valid for a perspective projection. Keep the same pose and
+            // render layers, but start the independent Scene camera with editor-like,
+            // well-defined perspective parameters.
+            camera.fieldOfView = DefaultPerspectiveFov;
+            camera.nearClipPlane = MinPerspectiveNear;
+            camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
+            _sourceProjectionInfo =
+                $"Source {source.name} Orthographic size={source.orthographicSize:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+        }
+        else
+        {
+            camera.fieldOfView = SanitizeFov(source.fieldOfView);
+            camera.nearClipPlane = SanitizeNear(source.nearClipPlane);
+            camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
+            _sourceProjectionInfo =
+                $"Source {source.name} Perspective FOV={source.fieldOfView:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+        }
+
+        camera.orthographic = false;
     }
 
-    private static Camera? FindSourceCamera(Camera viewerCamera)
+    private void ApplyProjection(Camera camera, bool orthographic)
     {
-        var main = Camera.main;
-        if (main is not null && main != viewerCamera && main.enabled && main.gameObject.activeInHierarchy)
+        if (orthographic)
         {
-            return main;
+            camera.orthographicSize = Mathf.Max(0.01f, _preferredOrthographicSize);
+            camera.orthographic = true;
+            return;
         }
 
-        Camera? best = null;
-        var bestDepth = float.PositiveInfinity;
-        var cameras = Camera.allCameras;
-
-        for (var index = 0; index < cameras.Length; index++)
-        {
-            var candidate = cameras[index];
-            if (candidate is null || candidate == viewerCamera || !candidate.enabled || !candidate.gameObject.activeInHierarchy)
-            {
-                continue;
-            }
-
-            // Prefer a normal display camera over cameras already rendering into a texture.
-            if (candidate.targetTexture is null)
-            {
-                if (best is null || best.targetTexture is not null || candidate.depth < bestDepth)
-                {
-                    best = candidate;
-                    bestDepth = candidate.depth;
-                }
-            }
-            else if (best is null)
-            {
-                best = candidate;
-                bestDepth = candidate.depth;
-            }
-        }
-
-        return best;
+        camera.fieldOfView = SanitizeFov(camera.fieldOfView);
+        camera.nearClipPlane = SanitizeNear(camera.nearClipPlane);
+        camera.farClipPlane = SanitizeFar(camera.farClipPlane, camera.nearClipPlane);
+        camera.orthographic = false;
     }
+
+    private static float SanitizeNear(float value) =>
+        float.IsNaN(value) || float.IsInfinity(value) || value < MinPerspectiveNear
+            ? MinPerspectiveNear
+            : value;
+
+    private static float SanitizeFar(float value, float near) =>
+        float.IsNaN(value) || float.IsInfinity(value) || value <= near + 1f
+            ? DefaultPerspectiveFar
+            : Mathf.Max(value, near + 1f);
+
+    private static float SanitizeFov(float value) =>
+        float.IsNaN(value) || float.IsInfinity(value)
+            ? DefaultPerspectiveFov
+            : Mathf.Clamp(value, MinPerspectiveFov, MaxPerspectiveFov);
 
     private void Focus(Vector3 target)
     {
@@ -378,11 +386,8 @@ internal sealed class SceneCameraController : IDisposable
 
         if (_camera is not null)
         {
-            _camera.enabled = false;
             _camera.targetTexture = null;
         }
-
-        _cameraRenderPending = false;
 
         if (_renderTexture is not null)
         {
