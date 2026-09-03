@@ -3,5 +3,5 @@ namespace U3DViewer.Protocol;
 public static class NativeBridgeProtocol
 {
     // Increment whenever the exported NativeBridge ABI changes incompatibly.
-    public const int AbiVersion = 2;
+    public const int AbiVersion = 3;
 }
