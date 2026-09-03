@@ -33,13 +33,29 @@ stage target Unity references when needed
 
 Other VSCode tasks include build-only, deploy-only, and `U3DViewer: Build + Deploy + Run Viewer`.
 
+## Process selection
+
+`U3DViewer.Viewer.exe` starts with a Unity process picker instead of connecting to one global pipe.
+
+The picker scans running Windows processes for Unity standalone layout markers such as `UnityPlayer.dll` / `<Game>_Data/globalgamemanagers`, detects Mono vs IL2CPP when possible, and reports the U3DViewer Agent state.
+
+Each Agent owns a process-specific pipe:
+
+```text
+u3d-viewer-<PID>
+```
+
+This allows multiple Unity games to run at the same time without their Viewer connections colliding. Processes without the Agent are still listed as `Not detected`; an Agent already occupied by another Viewer is shown as `Busy`.
+
 ## Current milestone
 
 M2 desktop UI and M3 Scene Camera control are implemented. M4 now has an initial end-to-end Scene View transport implementation ready for local runtime validation.
 
 Implemented:
 
-- automatic Named Pipe connection/reconnection to either Mono or IL2CPP agent
+- startup Unity process picker with PID/backend/Agent status
+- per-process Named Pipe connection (`u3d-viewer-<PID>`)
+- automatic connection/reconnection to the selected Mono or IL2CPP agent
 - live Runtime Hierarchy tree
 - selection that survives ordinary snapshot refreshes
 - read-only Runtime Inspector for GameObject state, Transform and component type names
