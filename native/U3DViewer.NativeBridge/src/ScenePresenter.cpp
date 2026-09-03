@@ -532,7 +532,7 @@ float4 main(PSIn input) : SV_TARGET
             return S_OK;
         }
 
-        if (hr != E_INVALIDARG)
+        if (hr != E_INVALIDARG && hr != DXGI_ERROR_INVALID_CALL)
         {
             return hr;
         }
