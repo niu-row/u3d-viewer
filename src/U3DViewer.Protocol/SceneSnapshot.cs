@@ -18,6 +18,11 @@ public sealed class RenderTargetInfo
     public int DxgiFormat { get; set; }
     public ulong AdapterLuid { get; set; }
     public string AdapterName { get; set; } = string.Empty;
+    public bool Orthographic { get; set; }
+    public float FieldOfView { get; set; }
+    public float NearClipPlane { get; set; }
+    public float FarClipPlane { get; set; }
+    public float OrthographicSize { get; set; }
     public string Status { get; set; } = string.Empty;
 }
 
