@@ -8,7 +8,11 @@ namespace U3DViewer.Agent.IL2CPP;
 
 internal static class SceneScanner
 {
-    public static SceneScanSession Begin(long sequence, int selectedInstanceId, HashSet<int> expandedInstanceIds)
+    public static SceneScanSession Begin(
+        long sequence,
+        int selectedInstanceId,
+        HashSet<int> expandedInstanceIds,
+        HashSet<long> expandedSceneKeys)
     {
         var scenes = new List<SceneInfo>();
         var pending = new Queue<SceneScanWorkItem>();
@@ -20,9 +24,11 @@ internal static class SceneScanner
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 var isLoaded = scene.isLoaded;
+                var sceneName = scene.name ?? string.Empty;
+                var sceneKey = ViewerCommandCodec.BuildSceneKey(scene.buildIndex, sceneName);
                 var roots = Array.Empty<GameObject>();
 
-                if (isLoaded)
+                if (isLoaded && expandedSceneKeys.Contains(sceneKey))
                 {
                     try
                     {
@@ -42,7 +48,7 @@ internal static class SceneScanner
                 scenes.Add(new SceneInfo
                 {
                     BuildIndex = scene.buildIndex,
-                    Name = scene.name ?? string.Empty,
+                    Name = sceneName,
                     IsLoaded = isLoaded,
                     Roots = rootInfos
                 });
