@@ -96,6 +96,25 @@ public sealed class Plugin : BasePlugin
     [HarmonyPatch(typeof(SceneCameraController), nameof(SceneCameraController.Apply))]
     private static class SceneCommandBootstrapPatch
     {
+        private const BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
+
+        private static readonly MethodInfo? EnsureCameraMethod =
+            typeof(SceneCameraController).GetMethod("EnsureCamera", InstancePrivate);
+        private static readonly MethodInfo? TryInitializeBridgeMethod =
+            typeof(SceneCameraController).GetMethod("TryInitializeBridge", InstancePrivate);
+        private static readonly MethodInfo? BoostInteractiveRenderMethod =
+            typeof(SceneCameraController).GetMethod("BoostInteractiveRender", InstancePrivate);
+        private static readonly FieldInfo? TransportTextureField =
+            typeof(SceneCameraController).GetField("_transportTexture", InstancePrivate);
+        private static readonly FieldInfo? RenderGenerationField =
+            typeof(SceneCameraController).GetField("_renderGeneration", InstancePrivate);
+        private static readonly FieldInfo? BridgeReadyField =
+            typeof(SceneCameraController).GetField("_bridgeReady", InstancePrivate);
+        private static readonly FieldInfo? RenderEventField =
+            typeof(SceneCameraController).GetField("_renderEvent", InstancePrivate);
+        private static readonly FieldInfo? SharedNameField =
+            typeof(SceneCameraController).GetField("_sharedName", InstancePrivate);
+
         [HarmonyPrefix]
         private static bool StabilizeFirstSharedFrame(SceneCameraController __instance, ref ViewerCommand command)
         {
@@ -103,6 +122,16 @@ public sealed class Plugin : BasePlugin
                 command.Kind != ViewerCommandKind.CameraRecover)
             {
                 return true;
+            }
+
+            // SRP recovery only needs to hand the already-existing transport texture back to
+            // the process-global NativeBridge. Releasing/recreating the Camera RenderTextures
+            // during a direct-capture handoff is unnecessary and has proven unsafe on IL2CPP.
+            if (command.Kind == ViewerCommandKind.CameraRecover &&
+                RenderPipelineManager.currentPipeline is not null)
+            {
+                RebindExistingFreeTransport(__instance);
+                return false;
             }
 
             // When direct capture releases the process-global NativeBridge, the free Camera
@@ -181,6 +210,66 @@ public sealed class Plugin : BasePlugin
             }
 
             return true;
+        }
+
+        private static void RebindExistingFreeTransport(SceneCameraController instance)
+        {
+            try
+            {
+                if (EnsureCameraMethod is null ||
+                    TryInitializeBridgeMethod is null ||
+                    TransportTextureField is null ||
+                    RenderGenerationField is null ||
+                    BridgeReadyField is null ||
+                    RenderEventField is null)
+                {
+                    _sharedLog?.LogWarning("Could not rebind free Scene transport: required SceneCameraController members were not resolved.");
+                    return;
+                }
+
+                EnsureCameraMethod.Invoke(instance, null);
+                if (TransportTextureField.GetValue(instance) is not RenderTexture transportTexture)
+                {
+                    _sharedLog?.LogWarning("Could not rebind free Scene transport: transport RenderTexture is unavailable.");
+                    return;
+                }
+
+                var nativeTexture = transportTexture.GetNativeTexturePtr();
+                if (nativeTexture == IntPtr.Zero)
+                {
+                    _sharedLog?.LogWarning("Could not rebind free Scene transport: transport RenderTexture has no native D3D11 texture.");
+                    return;
+                }
+
+                // Reset the one process-global writer, then make the still-live free transport
+                // texture a fresh generation. TryInitializeBridge will call SetSourceTexture,
+                // which observes FreeCamera ownership again.
+                NativeBridge.U3DViewer_Reset();
+                SceneTransportCoordinator.Observe(SceneTransportOwner.FreeCamera);
+                BridgeReadyField.SetValue(instance, false);
+                RenderEventField.SetValue(instance, IntPtr.Zero);
+
+                var generation = RenderGenerationField.GetValue(instance) is int value ? value : 0;
+                RenderGenerationField.SetValue(instance, generation + 1);
+                TryInitializeBridgeMethod.Invoke(instance, null);
+                BoostInteractiveRenderMethod?.Invoke(instance, null);
+
+                var bridgeReady = BridgeReadyField.GetValue(instance) is bool ready && ready;
+                var sharedName = SharedNameField?.GetValue(instance) as string ?? string.Empty;
+                _sharedLog?.LogInfo(
+                    bridgeReady
+                        ? $"Rebound existing free Scene transport without recreating RenderTextures. Shared target: {sharedName}."
+                        : "Rebound existing free Scene transport, but NativeBridge did not become ready.");
+            }
+            catch (TargetInvocationException ex)
+            {
+                _sharedLog?.LogWarning(
+                    $"Could not rebind existing free Scene transport: {ex.InnerException?.Message ?? ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                _sharedLog?.LogWarning($"Could not rebind existing free Scene transport: {ex.Message}");
+            }
         }
     }
 
