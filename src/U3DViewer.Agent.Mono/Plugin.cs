@@ -52,18 +52,19 @@ public sealed class Plugin : BaseUnityPlugin
     private double _gameFps;
     private bool _originalRunInBackground;
     private bool _runInBackgroundCaptured;
+    private bool _viewerSessionActive;
 
     private ManualLogSource LogSource => Logger;
 
     private void Awake()
     {
-        _originalRunInBackground = Application.runInBackground;
-        _runInBackgroundCaptured = true;
-        Application.runInBackground = true;
-
+        // Startup must remain passive. In particular, do not touch Application state,
+        // layer metadata, cameras, RenderTextures, or the native bridge before a real
+        // Viewer connection exists. Older Unity/Mono players can be sensitive to Unity
+        // API calls made this early in startup.
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
-        _sceneCamera = new SceneCameraController();
-        _sceneCulling = new SceneCullingController();
+        _sceneCamera = null;
+        _sceneCulling = null;
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
         _sceneScan = null;
@@ -74,11 +75,13 @@ public sealed class Plugin : BaseUnityPlugin
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
         _interactiveHierarchyRefresh = false;
+        _runInBackgroundCaptured = false;
+        _viewerSessionActive = false;
         ResetPerformanceMetrics();
 #if LEGACY_MONO
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}. Passive until Viewer connects.");
 #else
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Passive until Viewer connects.");
 #endif
     }
 
@@ -87,11 +90,20 @@ public sealed class Plugin : BaseUnityPlugin
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
-            ResetSnapshotState();
-            _expandedInstanceIds.Clear();
-            _nextSnapshotAt = 0f;
-            _interactiveHierarchyRefresh = false;
+            if (_viewerSessionActive)
+            {
+                EndViewerSession();
+            }
+            else
+            {
+                ResetDisconnectedState();
+            }
             return;
+        }
+
+        if (!_viewerSessionActive)
+        {
+            BeginViewerSession();
         }
 
         if (!Application.runInBackground)
@@ -266,6 +278,57 @@ public sealed class Plugin : BaseUnityPlugin
         }
     }
 
+    private void BeginViewerSession()
+    {
+        if (_viewerSessionActive)
+        {
+            return;
+        }
+
+        _originalRunInBackground = Application.runInBackground;
+        _runInBackgroundCaptured = true;
+        Application.runInBackground = true;
+
+        _sceneCamera = new SceneCameraController();
+        _sceneCulling = new SceneCullingController();
+        _viewerSessionActive = true;
+        _nextSnapshotAt = 0f;
+        ResetPerformanceMetrics();
+        LogSource.LogInfo("Viewer session activated.");
+    }
+
+    private void EndViewerSession()
+    {
+        if (!_viewerSessionActive)
+        {
+            ResetDisconnectedState();
+            return;
+        }
+
+        ResetDisconnectedState();
+        _sceneCulling = null;
+        _sceneCamera?.Dispose();
+        _sceneCamera = null;
+
+        if (_runInBackgroundCaptured)
+        {
+            Application.runInBackground = _originalRunInBackground;
+            _runInBackgroundCaptured = false;
+        }
+
+        _viewerSessionActive = false;
+        LogSource.LogInfo("Viewer session deactivated; game state restored.");
+    }
+
+    private void ResetDisconnectedState()
+    {
+        ResetSnapshotState();
+        _expandedInstanceIds.Clear();
+        _selectedInstanceId = 0;
+        _nextSnapshotAt = 0f;
+        _interactiveHierarchyRefresh = false;
+    }
+
 #if !LEGACY_MONO
     private void PublishCompletedSerialization(PipeServer pipeServer)
     {
@@ -383,18 +446,7 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
-        if (_runInBackgroundCaptured)
-        {
-            Application.runInBackground = _originalRunInBackground;
-            _runInBackgroundCaptured = false;
-        }
-
-        ResetSnapshotState();
-        _expandedInstanceIds.Clear();
-        _interactiveHierarchyRefresh = false;
-        _sceneCulling = null;
-        _sceneCamera?.Dispose();
-        _sceneCamera = null;
+        EndViewerSession();
         _pipeServer?.Dispose();
         _pipeServer = null;
     }
