@@ -32,6 +32,21 @@ U3DViewer then automatically:
 
 A running game selected through `Prepare + Restart` is only asked to close normally; U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process launched by U3DViewer itself may be terminated after interop generation completes.
 
+## Diagnostics
+
+The development Viewer is built as a console application in addition to the Avalonia GUI. Keep the console window open while preparing or attaching to a game.
+
+Runtime preparation messages, resolved Unity reference paths, compatibility fingerprints, Agent cache hits, and the live `dotnet build` stdout/stderr stream are written to the console.
+
+The same diagnostic stream is persisted under:
+
+```text
+%LOCALAPPDATA%/U3DViewer/Logs/
+  viewer-YYYYMMDD-HHMMSS-<PID>.log
+```
+
+Unhandled Viewer exceptions are also written there. `BepInEx/LogOutput.log` remains the game-side source for BepInEx/Agent load errors.
+
 ## Agent reuse and cache
 
 Agents are not rebuilt on every launch.
