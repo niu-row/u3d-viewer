@@ -35,7 +35,10 @@ internal sealed class ViewerConnection : IAsyncDisposable
     {
         _pipeName = ViewerSession.Target?.PipeName
             ?? throw new InvalidOperationException("No Unity process was selected before creating ViewerConnection.");
+        Active = this;
     }
+
+    internal static ViewerConnection? Active { get; private set; }
 
     public event Action<ConnectionState>? StateChanged;
     public event Action<SceneSnapshot>? SnapshotReceived;
@@ -119,18 +122,15 @@ internal sealed class ViewerConnection : IAsyncDisposable
                     }
                     catch (OperationCanceledException)
                     {
-                        // Normal when the pipe disconnects or Viewer shuts down.
                     }
                     catch (IOException)
                     {
-                        // The reader side already observed the disconnect.
                     }
                     DrainPendingCommands();
                 }
             }
             catch (TimeoutException)
             {
-                // Selected target is still running but its Agent may be restarting; retry quietly.
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -209,8 +209,12 @@ internal sealed class ViewerConnection : IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
-                // Normal shutdown.
             }
+        }
+
+        if (ReferenceEquals(Active, this))
+        {
+            Active = null;
         }
 
         _shutdown.Dispose();
