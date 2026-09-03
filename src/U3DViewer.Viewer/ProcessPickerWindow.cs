@@ -472,7 +472,8 @@ internal sealed class ProcessPickerWindow : Window
         }
 
         var elapsed = DateTime.UtcNow - _operationStartedUtc;
-        _summary.Text = $"{_operationMessage}  ·  {elapsed:mm\:ss}";
+        var totalMinutes = (int)elapsed.TotalMinutes;
+        _summary.Text = $"{_operationMessage}  ·  {totalMinutes:00}:{elapsed.Seconds:00}";
     }
 
     private static (double Value, bool Indeterminate) ResolveProgressState(string message)
@@ -494,6 +495,6 @@ internal sealed class ProcessPickerWindow : Window
         if (message.Contains("Launching game", StringComparison.OrdinalIgnoreCase) ||
             message.Contains("waiting for U3DViewer Agent", StringComparison.OrdinalIgnoreCase)) return (92, true);
         if (message.Contains("Agent ready", StringComparison.OrdinalIgnoreCase)) return (100, false);
-        return (Math.Max(2, 0), false);
+        return (2, false);
     }
 }
