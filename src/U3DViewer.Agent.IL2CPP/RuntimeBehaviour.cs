@@ -92,6 +92,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         }
 
         UpdateGameFps();
+        var flushSceneTransport = false;
 
         while (pipeServer.TryDequeueCommand(out var command))
         {
@@ -127,6 +128,14 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                             _sceneCulling?.Reapply();
                         }
 
+                        if (command.Kind == ViewerCommandKind.CameraReset ||
+                            command.Kind == ViewerCommandKind.CameraRecover ||
+                            command.Kind == ViewerCommandKind.CameraStreamSettings ||
+                            (command.Kind == ViewerCommandKind.CameraVisibility && command.Flag))
+                        {
+                            flushSceneTransport = true;
+                        }
+
                         if (command.Kind == ViewerCommandKind.CameraStreamSettings ||
                             command.Kind == ViewerCommandKind.CameraRecover)
                         {
@@ -143,6 +152,18 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         }
 
         _sceneCamera?.TickRender();
+        if (flushSceneTransport)
+        {
+            try
+            {
+                GL.Flush();
+            }
+            catch (Exception ex)
+            {
+                _log?.LogWarning($"Failed to flush IL2CPP Scene transport bootstrap commands: {ex.Message}");
+            }
+        }
+
         PublishCompletedSerialization(pipeServer);
 
         if (_snapshotSerialization is not null)
