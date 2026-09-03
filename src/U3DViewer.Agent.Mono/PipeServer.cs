@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Text;
 using BepInEx.Logging;
@@ -10,9 +9,11 @@ internal sealed class PipeServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly ManualLogSource _log;
-    private readonly ConcurrentQueue<string> _outbound = new();
-    private readonly ConcurrentQueue<ViewerCommand> _inbound = new();
-    private readonly AutoResetEvent _signal = new(false);
+    private readonly Queue<string> _outbound = new Queue<string>();
+    private readonly Queue<ViewerCommand> _inbound = new Queue<ViewerCommand>();
+    private readonly object _outboundLock = new object();
+    private readonly object _inboundLock = new object();
+    private readonly AutoResetEvent _signal = new AutoResetEvent(false);
     private Thread? _thread;
     private NamedPipeServerStream? _activePipe;
     private volatile bool _stopping;
@@ -44,12 +45,46 @@ internal sealed class PipeServer : IDisposable
             return;
         }
 
-        _outbound.Enqueue(json);
-        while (_outbound.Count > 2 && _outbound.TryDequeue(out _)) { }
+        lock (_outboundLock)
+        {
+            _outbound.Enqueue(json);
+            while (_outbound.Count > 2)
+            {
+                _outbound.Dequeue();
+            }
+        }
         _signal.Set();
     }
 
-    public bool TryDequeueCommand(out ViewerCommand command) => _inbound.TryDequeue(out command);
+    public bool TryDequeueCommand(out ViewerCommand command)
+    {
+        lock (_inboundLock)
+        {
+            if (_inbound.Count == 0)
+            {
+                command = default(ViewerCommand);
+                return false;
+            }
+
+            command = _inbound.Dequeue();
+            return true;
+        }
+    }
+
+    private bool TryDequeueOutbound(out string payload)
+    {
+        lock (_outboundLock)
+        {
+            if (_outbound.Count == 0)
+            {
+                payload = string.Empty;
+                return false;
+            }
+
+            payload = _outbound.Dequeue();
+            return true;
+        }
+    }
 
     private void Run()
     {
@@ -89,14 +124,14 @@ internal sealed class PipeServer : IDisposable
                 };
                 readerThread.Start();
 
-                using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 16 * 1024, leaveOpen: true)
+                var writer = new StreamWriter(pipe, new UTF8Encoding(false))
                 {
                     AutoFlush = true
                 };
 
-                while (!_stopping && pipe.IsConnected && Volatile.Read(ref readerFinished) == 0)
+                while (!_stopping && pipe.IsConnected && Interlocked.CompareExchange(ref readerFinished, 0, 0) == 0)
                 {
-                    if (_outbound.TryDequeue(out var payload))
+                    if (TryDequeueOutbound(out var payload))
                     {
                         writer.WriteLine(payload);
                     }
@@ -124,15 +159,15 @@ internal sealed class PipeServer : IDisposable
             {
                 _viewerConnected = false;
                 _activePipe = null;
-                while (_outbound.TryDequeue(out _)) { }
-                while (_inbound.TryDequeue(out _)) { }
+                lock (_outboundLock) _outbound.Clear();
+                lock (_inboundLock) _inbound.Clear();
             }
         }
     }
 
     private void ReadCommands(NamedPipeServerStream pipe)
     {
-        using var reader = new StreamReader(pipe, Encoding.UTF8, true, 4096, leaveOpen: true);
+        var reader = new StreamReader(pipe, Encoding.UTF8);
         while (!_stopping && pipe.IsConnected)
         {
             var line = reader.ReadLine();
@@ -143,7 +178,10 @@ internal sealed class PipeServer : IDisposable
 
             if (ViewerCommandCodec.TryParse(line, out var command))
             {
-                _inbound.Enqueue(command);
+                lock (_inboundLock)
+                {
+                    _inbound.Enqueue(command);
+                }
             }
             else
             {
@@ -159,6 +197,6 @@ internal sealed class PipeServer : IDisposable
         _signal.Set();
         try { _activePipe?.Dispose(); } catch { }
         _thread?.Join(1000);
-        _signal.Dispose();
+        _signal.Close();
     }
 }
