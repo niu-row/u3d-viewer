@@ -74,14 +74,14 @@ internal sealed class MainWindow : Window
 
         PropertyChanged += (_, e) =>
         {
-            if (e.Property == WindowStateProperty || e.Property == IsVisibleProperty)
+            if (e.Property == Window.WindowStateProperty || e.Property == Visual.IsVisibleProperty)
             {
                 UpdateSceneRenderVisibility();
             }
         };
         _scenePanel.PropertyChanged += (_, e) =>
         {
-            if (e.Property == IsVisibleProperty)
+            if (e.Property == Visual.IsVisibleProperty)
             {
                 UpdateSceneRenderVisibility();
             }
@@ -258,7 +258,7 @@ internal sealed class MainWindow : Window
 
     private void UpdateSceneRenderVisibility()
     {
-        var visible = IsVisible && WindowState != WindowState.Minimized && _scenePanel.IsVisible;
+        var visible = IsVisible && this.WindowState != Avalonia.Controls.WindowState.Minimized && _scenePanel.IsVisible;
         if (_sceneVisibilitySent && visible == _lastSceneVisible)
         {
             return;
