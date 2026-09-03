@@ -28,6 +28,7 @@ internal sealed class ScenePanel : Grid
     private readonly ToggleButton _perspectiveButton;
     private readonly ToggleButton _orthographicButton;
     private readonly ComboBox _sourceCameraBox;
+    private readonly CheckBox _captureSourceBox;
     private readonly CheckBox _followPositionBox;
     private readonly CheckBox _followRotationBox;
     private readonly DispatcherTimer _resizeDebounce = new();
@@ -40,8 +41,10 @@ internal sealed class ScenePanel : Grid
     private bool _autoViewportInitialized;
     private bool _followPosition;
     private bool _followRotation;
+    private bool _captureSourceOutput;
     private bool _updatingFollowControls;
     private bool _updatingSourceCameraChoices;
+    private bool _updatingCaptureSource;
     private Size _pendingViewportSize;
     private int _requestedAutoWidth;
     private int _requestedAutoHeight;
@@ -101,6 +104,15 @@ internal sealed class ScenePanel : Grid
         };
         _sourceCameraBox.SelectionChanged += (_, _) => OnSourceCameraChanged();
 
+        _captureSourceBox = new CheckBox
+        {
+            Content = CaptureSourceLabel(),
+            IsChecked = false,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 2)
+        };
+        _captureSourceBox.IsCheckedChanged += (_, _) => OnCaptureSourceChanged();
+
         _followPositionBox = new CheckBox
         {
             Content = FollowPositionLabel(),
@@ -139,6 +151,7 @@ internal sealed class ScenePanel : Grid
             FontWeight = FontWeight.SemiBold
         });
         commands.Children.Add(_sourceCameraBox);
+        commands.Children.Add(_captureSourceBox);
         commands.Children.Add(_followPositionBox);
         commands.Children.Add(_followRotationBox);
         commands.Children.Add(_moveSpeedStatus);
@@ -259,6 +272,16 @@ internal sealed class ScenePanel : Grid
         _performanceStatus.Text = Localization.T("main.perfWaiting");
         _perspectiveButton.IsChecked = false;
         _orthographicButton.IsChecked = false;
+        _updatingCaptureSource = true;
+        try
+        {
+            _captureSourceOutput = false;
+            _captureSourceBox.IsChecked = false;
+        }
+        finally
+        {
+            _updatingCaptureSource = false;
+        }
         _updatingSourceCameraChoices = true;
         try
         {
@@ -285,6 +308,7 @@ internal sealed class ScenePanel : Grid
         _settingsButton.Content = SettingsLabel();
         _perspectiveButton.Content = Localization.T("main.perspective");
         _orthographicButton.Content = Localization.T("main.orthographic");
+        _captureSourceBox.Content = CaptureSourceLabel();
         _followPositionBox.Content = FollowPositionLabel();
         _followRotationBox.Content = FollowRotationLabel();
         if (_latestTarget is not null)
@@ -305,6 +329,24 @@ internal sealed class ScenePanel : Grid
         _setDetail(choice.InstanceId == 0
             ? (Localization.IsChinese ? "Scene 相机已切回自动选择。" : "Scene source camera set to automatic selection.")
             : (Localization.IsChinese ? $"Scene 相机已切换到 {choice.Name}。" : $"Scene source camera set to {choice.Name}."));
+    }
+
+    private void OnCaptureSourceChanged()
+    {
+        if (_updatingCaptureSource)
+        {
+            return;
+        }
+
+        _captureSourceOutput = _captureSourceBox.IsChecked == true;
+        _sendCommand(ViewerCommandCodec.EncodeCameraSourceCapture(_captureSourceOutput));
+        _setDetail(_captureSourceOutput
+            ? (Localization.IsChinese
+                ? "已启用源相机直捕：显示游戏 Camera 的实际最终输出，自由移动暂不影响画面。"
+                : "Direct source Camera capture enabled; free Scene movement does not affect the captured game Camera output.")
+            : (Localization.IsChinese
+                ? "已恢复自由 Scene Camera。"
+                : "Free Scene Camera restored."));
     }
 
     private void UpdateSourceCameraChoices(RenderTargetInfo target)
@@ -642,6 +684,7 @@ internal sealed class ScenePanel : Grid
 
     private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
     private static string SourceCameraLabel() => Localization.IsChinese ? "源相机" : "Source Camera";
+    private static string CaptureSourceLabel() => Localization.IsChinese ? "直捕源相机" : "Capture Source Output";
     private static string FollowPositionLabel() => Localization.IsChinese ? "跟随位置" : "Follow Position";
     private static string FollowRotationLabel() => Localization.IsChinese ? "跟随朝向" : "Follow Rotation";
 
