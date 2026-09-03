@@ -27,7 +27,7 @@ public enum ViewerCommandKind
     HierarchyExpanded
 }
 
-public readonly struct ViewerCommand
+public struct ViewerCommand
 {
     public ViewerCommand(
         ViewerCommandKind kind,
@@ -53,16 +53,16 @@ public readonly struct ViewerCommand
         CullingMask = cullingMask;
     }
 
-    public ViewerCommandKind Kind { get; }
-    public float X { get; }
-    public float Y { get; }
-    public float Z { get; }
-    public float Value { get; }
-    public int InstanceId { get; }
-    public bool Flag { get; }
-    public bool Flag2 { get; }
-    public SceneCullingMode CullingMode { get; }
-    public int CullingMask { get; }
+    public ViewerCommandKind Kind { get; private set; }
+    public float X { get; private set; }
+    public float Y { get; private set; }
+    public float Z { get; private set; }
+    public float Value { get; private set; }
+    public int InstanceId { get; private set; }
+    public bool Flag { get; private set; }
+    public bool Flag2 { get; private set; }
+    public SceneCullingMode CullingMode { get; private set; }
+    public int CullingMask { get; private set; }
 }
 
 public static class ViewerCommandCodec
@@ -123,8 +123,8 @@ public static class ViewerCommandCodec
 
     public static bool TryParse(string line, out ViewerCommand command)
     {
-        command = default;
-        if (string.IsNullOrWhiteSpace(line))
+        command = default(ViewerCommand);
+        if (IsNullOrWhiteSpace(line))
         {
             return false;
         }
@@ -246,6 +246,24 @@ public static class ViewerCommandCodec
             default:
                 return false;
         }
+    }
+
+    private static bool IsNullOrWhiteSpace(string value)
+    {
+        if (value == null)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (!char.IsWhiteSpace(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string F(float value) => value.ToString("R", CultureInfo.InvariantCulture);
