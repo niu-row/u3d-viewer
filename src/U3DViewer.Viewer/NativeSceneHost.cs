@@ -61,7 +61,14 @@ internal sealed class NativeSceneHost : NativeControlHost
         }
 
         _target = target;
-        TryOpenPresenter(force: true);
+        if (_presenterOpen)
+        {
+            SetLiveStatus(target);
+        }
+        else
+        {
+            TryOpenPresenter(force: true);
+        }
     }
 
     public void Shutdown()
@@ -218,10 +225,7 @@ internal sealed class NativeSceneHost : NativeControlHost
             }
 
             _presenterOpen = true;
-            SetStatus(
-                $"LIVE GPU · {target.Width}×{target.Height} · DXGI {target.DxgiFormat} · " +
-                "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus\n" +
-                $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
+            SetLiveStatus(target);
             ViewerLog.Info($"Scene zero-copy presenter opened. Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
         }
         catch (EntryPointNotFoundException ex)
@@ -239,6 +243,22 @@ internal sealed class NativeSceneHost : NativeControlHost
             SetStatus($"Opening zero-copy Scene presenter failed: {ex.Message}");
             ViewerLog.Error("Opening zero-copy Scene presenter failed.", ex);
         }
+    }
+
+    private void SetLiveStatus(RenderTargetInfo target)
+    {
+        var presenterLuid = U3DViewer_GetScenePresenterAdapterLuid(_hostWindow);
+        var presenterName = GetPresenterAdapterName();
+        var gameGpu = FormatAdapter(target.AdapterName, target.AdapterLuid);
+        var viewerGpu = FormatAdapter(presenterName, presenterLuid);
+        var agentStatus = string.IsNullOrWhiteSpace(target.Status)
+            ? string.Empty
+            : "\n" + target.Status.Trim();
+
+        SetStatus(
+            $"LIVE GPU · {target.Width}×{target.Height} · DXGI {target.DxgiFormat} · " +
+            "RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus\n" +
+            $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}" + agentStatus);
     }
 
     private void PollInput(float deltaSeconds)
