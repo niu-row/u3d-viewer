@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 using U3DViewer.Protocol;
+using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace U3DViewer.Agent.IL2CPP;
 
@@ -17,6 +20,7 @@ public sealed class Plugin : BasePlugin
     private static ManualLogSource? _sharedLog;
     private static bool _bootstrapResizeNoticeLogged;
     private static bool _bootstrapRecoverNoticeLogged;
+    private static bool _srpSceneNoticeLogged;
 
     private PipeServer? _pipeServer;
     private Harmony? _sceneTransportHarmony;
@@ -26,6 +30,7 @@ public sealed class Plugin : BasePlugin
         _sharedLog = Log;
         _bootstrapResizeNoticeLogged = false;
         _bootstrapRecoverNoticeLogged = false;
+        _srpSceneNoticeLogged = false;
         InstallSceneTransportCompatibility();
 
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
@@ -69,8 +74,9 @@ public sealed class Plugin : BasePlugin
         {
             harmony.CreateClassProcessor(typeof(SceneCommandBootstrapPatch)).Patch();
             harmony.CreateClassProcessor(typeof(SceneWriterStatusPatch)).Patch();
+            harmony.CreateClassProcessor(typeof(SrpSceneCameraRenderPatch)).Patch();
             _sceneTransportHarmony = harmony;
-            Log.LogInfo("Installed IL2CPP Scene first-frame transport guard.");
+            Log.LogInfo("Installed IL2CPP Scene transport compatibility patches.");
         }
         catch (Exception ex)
         {
@@ -83,7 +89,7 @@ public sealed class Plugin : BasePlugin
             }
 
             _sceneTransportHarmony = null;
-            Log.LogWarning($"Could not install IL2CPP Scene first-frame transport guard: {ex.Message}");
+            Log.LogWarning($"Could not install IL2CPP Scene transport compatibility patches: {ex.Message}");
         }
     }
 
@@ -193,6 +199,73 @@ public sealed class Plugin : BasePlugin
             }
             catch
             {
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(SceneCameraController), nameof(SceneCameraController.TickRender))]
+    private static class SrpSceneCameraRenderPatch
+    {
+        private const BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
+
+        private static readonly MethodInfo? EnsureCameraMethod =
+            typeof(SceneCameraController).GetMethod("EnsureCamera", InstancePrivate);
+        private static readonly MethodInfo? RefreshSourceCameraMethod =
+            typeof(SceneCameraController).GetMethod("RefreshSourceCameraIfNeeded", InstancePrivate);
+        private static readonly MethodInfo? ApplyFollowTransformMethod =
+            typeof(SceneCameraController).GetMethod("ApplyFollowTransform", InstancePrivate);
+        private static readonly MethodInfo? ResetSceneFpsMethod =
+            typeof(SceneCameraController).GetMethod("ResetSceneFps", InstancePrivate);
+        private static readonly FieldInfo? CameraField =
+            typeof(SceneCameraController).GetField("_camera", InstancePrivate);
+        private static readonly FieldInfo? ViewerVisibleField =
+            typeof(SceneCameraController).GetField("_viewerVisible", InstancePrivate);
+
+        [HarmonyPrefix]
+        private static bool RenderThroughActivePipeline(SceneCameraController __instance)
+        {
+            if (RenderPipelineManager.currentPipeline is null)
+            {
+                return true;
+            }
+
+            try
+            {
+                EnsureCameraMethod?.Invoke(__instance, null);
+                var now = Time.unscaledTime;
+                RefreshSourceCameraMethod?.Invoke(__instance, new object[] { now });
+
+                var camera = CameraField?.GetValue(__instance) as Camera;
+                var viewerVisible = ViewerVisibleField?.GetValue(__instance) is bool visible && visible;
+                if (camera is not null)
+                {
+                    camera.enabled = viewerVisible;
+                }
+
+                if (!viewerVisible)
+                {
+                    ResetSceneFpsMethod?.Invoke(__instance, new object[] { now });
+                    return false;
+                }
+
+                ApplyFollowTransformMethod?.Invoke(__instance, new object[] { false });
+                if (!_srpSceneNoticeLogged)
+                {
+                    _srpSceneNoticeLogged = true;
+                    var pipeline = RenderPipelineManager.currentPipeline;
+                    var pipelineName = pipeline?.GetType().FullName ?? pipeline?.GetType().Name ?? "unknown SRP";
+                    _sharedLog?.LogInfo(
+                        $"Free Scene Camera is rendered by the active RenderPipeline ({pipelineName}); NativeBridge publication occurs at end-of-frame.");
+                }
+
+                // Do not call Camera.Render() under SRP. The enabled U3DViewer Camera targets
+                // its own RenderTexture and is rendered normally by the game's RenderPipeline.
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _sharedLog?.LogWarning($"Could not route free Scene Camera through SRP: {ex.Message}");
+                return true;
             }
         }
     }
