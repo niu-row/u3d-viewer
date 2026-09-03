@@ -20,7 +20,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-    constexpr int kNativeBridgeAbiVersion = 1;
+    constexpr int kNativeBridgeAbiVersion = 2;
     constexpr int kCopySceneTextureEvent = 1;
 
     std::mutex g_mutex;
@@ -35,6 +35,7 @@ namespace
     std::wstring g_sharedName;
     LUID g_sourceAdapterLuid{};
     std::wstring g_sourceAdapterName;
+    bool g_writerReady = false;
 
     HRESULT g_lastError = S_OK;
 
@@ -99,6 +100,7 @@ namespace
 
     void ResetWriterResourceLocked(bool clearAdapterInfo = false)
     {
+        g_writerReady = false;
         g_sharedMutex.Reset();
         if (g_sharedHandle != nullptr)
         {
@@ -235,7 +237,14 @@ namespace
         }
 
         g_context->CopyResource(g_sharedTexture.Get(), g_sourceTexture.Get());
-        g_sharedMutex->ReleaseSync(1);
+        hr = g_sharedMutex->ReleaseSync(1);
+        if (FAILED(hr))
+        {
+            g_lastError = hr;
+            return;
+        }
+
+        g_writerReady = true;
         g_lastError = S_OK;
     }
 
@@ -295,6 +304,12 @@ U3DVIEWER_EXPORT void* U3DViewer_GetRenderEventFunc()
 U3DVIEWER_EXPORT int U3DViewer_GetCopyEventId()
 {
     return kCopySceneTextureEvent;
+}
+
+U3DVIEWER_EXPORT int U3DViewer_IsSceneWriterReady()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_writerReady && g_sharedTexture && g_sharedHandle != nullptr && g_sharedMutex ? 1 : 0;
 }
 
 U3DVIEWER_EXPORT int U3DViewer_GetSourceDxgiFormat()
