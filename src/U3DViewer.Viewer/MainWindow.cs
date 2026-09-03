@@ -65,6 +65,8 @@ internal sealed class MainWindow : Window
         _hierarchyPanel.SelectionChanged += OnHierarchySelectionChanged;
         _hierarchyPanel.ExpansionChanged += (instanceId, expanded) =>
             SendCommand(ViewerCommandCodec.EncodeHierarchyExpanded(instanceId, expanded));
+        _hierarchyPanel.SceneExpansionChanged += (buildIndex, sceneName, expanded) =>
+            SendCommand(ViewerCommandCodec.EncodeSceneExpanded(buildIndex, sceneName, expanded));
 
         _sceneBootstrapTimer.Interval = TimeSpan.FromMilliseconds(500);
         _sceneBootstrapTimer.Tick += (_, _) => BootstrapSceneCamera();
