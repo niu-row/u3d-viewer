@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 
 namespace U3DViewer.Protocol;
@@ -24,7 +25,8 @@ public enum ViewerCommandKind
     CameraVisibility,
     CameraFocus,
     SelectObject,
-    HierarchyExpanded
+    HierarchyExpanded,
+    SceneExpanded
 }
 
 public struct ViewerCommand
@@ -117,6 +119,19 @@ public static class ViewerCommandCodec
             "hierarchy.expanded",
             instanceId.ToString(CultureInfo.InvariantCulture),
             expanded ? "1" : "0");
+
+    public static string EncodeSceneExpanded(int buildIndex, string sceneName, bool expanded) =>
+        Join(
+            "hierarchy.scene",
+            buildIndex.ToString(CultureInfo.InvariantCulture),
+            StableSceneNameHash(sceneName).ToString(CultureInfo.InvariantCulture),
+            expanded ? "1" : "0");
+
+    public static long BuildSceneKey(int buildIndex, string sceneName) =>
+        BuildSceneKey(buildIndex, StableSceneNameHash(sceneName));
+
+    public static long BuildSceneKey(int buildIndex, int sceneNameHash) =>
+        ((long)(uint)buildIndex << 32) | (uint)sceneNameHash;
 
     public static bool TryParse(string line, out ViewerCommand command)
     {
@@ -240,8 +255,37 @@ public static class ViewerCommandCodec
                     flag: parts[2] == "1");
                 return true;
 
+            case "hierarchy.scene" when parts.Length == 4 &&
+                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sceneBuildIndex) &&
+                int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sceneNameHash) &&
+                (parts[3] == "0" || parts[3] == "1"):
+                command = new ViewerCommand(
+                    ViewerCommandKind.SceneExpanded,
+                    instanceId: sceneBuildIndex,
+                    flag: parts[3] == "1",
+                    cullingMask: sceneNameHash);
+                return true;
+
             default:
                 return false;
+        }
+    }
+
+    private static int StableSceneNameHash(string value)
+    {
+        unchecked
+        {
+            uint hash = 2166136261u;
+            value = value ?? string.Empty;
+            for (var index = 0; index < value.Length; index++)
+            {
+                var character = value[index];
+                hash ^= (byte)(character & 0xff);
+                hash *= 16777619u;
+                hash ^= (byte)(character >> 8);
+                hash *= 16777619u;
+            }
+            return (int)hash;
         }
     }
 
