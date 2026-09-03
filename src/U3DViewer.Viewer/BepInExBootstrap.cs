@@ -9,15 +9,19 @@ internal sealed record BepInExBootstrapResult(bool Success, string Message);
 
 internal static class BepInExBootstrap
 {
-    private const string MonoArchiveUrl = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.Mono-win-x64-6.0.0-be.785%2B6abdba4.zip";
-    private const string Il2CppArchiveUrl = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785%2B6abdba4.zip";
+    private const string MonoArchiveUrlX64 = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.Mono-win-x64-6.0.0-be.785%2B6abdba4.zip";
+    private const string MonoArchiveUrlX86 = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.Mono-win-x86-6.0.0-be.785%2B6abdba4.zip";
+    private const string Il2CppArchiveUrlX64 = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785%2B6abdba4.zip";
+    private const string Il2CppArchiveUrlX86 = "https://builds.bepinex.dev/projects/bepinex_be/785/BepInEx-Unity.IL2CPP-win-x86-6.0.0-be.785%2B6abdba4.zip";
     private static readonly TimeSpan InteropTimeout = TimeSpan.FromMinutes(2);
     private static readonly HttpClient Http = CreateHttpClient();
 
     public static bool IsInstalled(string executablePath, string? backend = null)
     {
         var gameDirectory = Path.GetDirectoryName(executablePath);
-        if (string.IsNullOrWhiteSpace(gameDirectory))
+        if (string.IsNullOrWhiteSpace(gameDirectory) ||
+            !UnityProcessDiscovery.TryGetExecutableArchitecture(executablePath, out var architecture) ||
+            architecture is not ("x86" or "x64"))
         {
             return false;
         }
@@ -25,8 +29,7 @@ internal static class BepInExBootstrap
         var coreDirectory = Path.Combine(gameDirectory, "BepInEx", "core");
         if (!File.Exists(Path.Combine(coreDirectory, "BepInEx.Core.dll")) ||
             !File.Exists(Path.Combine(gameDirectory, "doorstop_config.ini")) ||
-            (!File.Exists(Path.Combine(gameDirectory, "winhttp.dll")) &&
-             !File.Exists(Path.Combine(gameDirectory, "version.dll"))))
+            !HasMatchingDoorstopProxy(gameDirectory, architecture))
         {
             return false;
         }
@@ -45,14 +48,25 @@ internal static class BepInExBootstrap
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        if (IsInstalled(executablePath, backend))
-        {
-            return ApplyLowOverheadProfile(executablePath, "BepInEx is already installed.", progress);
-        }
-
         if (backend is not ("Mono" or "IL2CPP"))
         {
             return new BepInExBootstrapResult(false, $"Cannot select a BepInEx package for backend '{backend}'.");
+        }
+
+        if (!UnityProcessDiscovery.TryGetExecutableArchitecture(executablePath, out var architecture))
+        {
+            return new BepInExBootstrapResult(false, "Could not determine the target game's PE architecture.");
+        }
+
+        if (architecture is not ("x86" or "x64"))
+        {
+            return new BepInExBootstrapResult(false, $"Unsupported target game architecture: {architecture}.");
+        }
+
+        if (IsInstalled(executablePath, backend))
+        {
+            progress?.Report($"Detected Unity {backend} {architecture}; existing BepInEx loader matches the game architecture.");
+            return ApplyLowOverheadProfile(executablePath, "BepInEx is already installed.", progress);
         }
 
         var gameDirectory = Path.GetDirectoryName(executablePath);
@@ -66,15 +80,13 @@ internal static class BepInExBootstrap
             var cacheDirectory = ViewerPaths.GetGameDownloadsDirectory(executablePath);
             Directory.CreateDirectory(cacheDirectory);
 
-            var archiveName = backend == "Mono"
-                ? "BepInEx-Unity.Mono-win-x64-6.0.0-be.785.zip"
-                : "BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785.zip";
+            var archiveName = $"BepInEx-Unity.{(backend == "Mono" ? "Mono" : "IL2CPP")}-win-{architecture}-6.0.0-be.785.zip";
             var archivePath = Path.Combine(cacheDirectory, archiveName);
-            var url = backend == "Mono" ? MonoArchiveUrl : Il2CppArchiveUrl;
+            var url = GetArchiveUrl(backend, architecture);
 
             if (!File.Exists(archivePath))
             {
-                progress?.Report($"Downloading BepInEx 6 for Unity {backend} x64...");
+                progress?.Report($"Downloading BepInEx 6 for Unity {backend} {architecture}...");
                 using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 response.EnsureSuccessStatusCode();
                 await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -82,17 +94,17 @@ internal static class BepInExBootstrap
                 await input.CopyToAsync(output, cancellationToken);
             }
 
-            progress?.Report("Installing or repairing BepInEx in the selected game...");
+            progress?.Report($"Installing or repairing BepInEx {architecture} in the selected game...");
             ZipFile.ExtractToDirectory(archivePath, gameDirectory, overwriteFiles: true);
 
             if (!IsInstalled(executablePath, backend))
             {
                 return new BepInExBootstrapResult(
                     false,
-                    "BepInEx archive was extracted, but the Doorstop loader or backend preloader files are still incomplete.");
+                    $"BepInEx {architecture} archive was extracted, but the Doorstop loader or backend preloader files are still incomplete or architecture-mismatched.");
             }
 
-            return ApplyLowOverheadProfile(executablePath, "BepInEx installed/repaired.", progress);
+            return ApplyLowOverheadProfile(executablePath, $"BepInEx {architecture} installed/repaired.", progress);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -122,6 +134,12 @@ internal static class BepInExBootstrap
             return false;
         }
 
+        if (!UnityProcessDiscovery.TryGetExecutableArchitecture(executablePath, out var architecture))
+        {
+            message = "Could not determine target architecture while switching the Doorstop proxy.";
+            return false;
+        }
+
         var winHttpPath = Path.Combine(gameDirectory, "winhttp.dll");
         var versionPath = Path.Combine(gameDirectory, "version.dll");
 
@@ -129,14 +147,13 @@ internal static class BepInExBootstrap
         {
             if (File.Exists(versionPath) && !File.Exists(winHttpPath))
             {
-                message = "Legacy Doorstop version.dll proxy is already enabled.";
-                return true;
-            }
+                if (ProxyMatchesArchitecture(versionPath, architecture))
+                {
+                    message = $"Legacy Doorstop version.dll proxy is already enabled for {architecture}.";
+                    return true;
+                }
 
-            if (File.Exists(versionPath))
-            {
-                message =
-                    $"Cannot automatically switch BepInEx to the legacy version.dll proxy because the game already has its own file: {versionPath}";
+                message = $"Existing version.dll does not match the target {architecture} architecture and no matching winhttp.dll is available to replace it.";
                 return false;
             }
 
@@ -146,9 +163,29 @@ internal static class BepInExBootstrap
                 return false;
             }
 
+            if (!ProxyMatchesArchitecture(winHttpPath, architecture))
+            {
+                message = $"BepInEx winhttp.dll does not match the target {architecture} architecture. Re-run runtime preparation to repair BepInEx.";
+                return false;
+            }
+
+            if (File.Exists(versionPath))
+            {
+                if (ProxyMatchesArchitecture(versionPath, architecture))
+                {
+                    message =
+                        $"Cannot automatically switch BepInEx to version.dll because the game already has an architecture-compatible file: {versionPath}";
+                    return false;
+                }
+
+                // A DLL with the opposite PE architecture cannot be a usable proxy for this target EXE.
+                // This also repairs stale proxies left by an earlier U3DViewer run that installed the wrong BepInEx architecture.
+                File.Delete(versionPath);
+            }
+
             File.Move(winHttpPath, versionPath);
             message =
-                "Switched BepInEx Doorstop from winhttp.dll to version.dll for legacy Unity compatibility.";
+                $"Switched BepInEx Doorstop from winhttp.dll to version.dll for legacy Unity {architecture} compatibility.";
             return true;
         }
         catch (Exception ex)
@@ -234,6 +271,25 @@ internal static class BepInExBootstrap
                 $"Last compatibility check: {resolutionError} Check BepInEx/LogOutput.log or LogOutput.txt.");
         }
     }
+
+    private static string GetArchiveUrl(string backend, string architecture) =>
+        (backend, architecture) switch
+        {
+            ("Mono", "x86") => MonoArchiveUrlX86,
+            ("Mono", "x64") => MonoArchiveUrlX64,
+            ("IL2CPP", "x86") => Il2CppArchiveUrlX86,
+            ("IL2CPP", "x64") => Il2CppArchiveUrlX64,
+            _ => throw new InvalidOperationException($"Unsupported BepInEx package combination: {backend}/{architecture}.")
+        };
+
+    private static bool HasMatchingDoorstopProxy(string gameDirectory, string architecture) =>
+        ProxyMatchesArchitecture(Path.Combine(gameDirectory, "winhttp.dll"), architecture) ||
+        ProxyMatchesArchitecture(Path.Combine(gameDirectory, "version.dll"), architecture);
+
+    private static bool ProxyMatchesArchitecture(string path, string architecture) =>
+        File.Exists(path) &&
+        UnityProcessDiscovery.TryGetExecutableArchitecture(path, out var proxyArchitecture) &&
+        string.Equals(proxyArchitecture, architecture, StringComparison.OrdinalIgnoreCase);
 
     private static BepInExBootstrapResult ApplyLowOverheadProfile(
         string executablePath,
