@@ -105,6 +105,15 @@ public sealed class Plugin : BasePlugin
                 return true;
             }
 
+            // When direct capture releases the process-global NativeBridge, the free Camera
+            // must be allowed to rebuild its transport even though its previous shared name
+            // is no longer writer-ready. Deferring CameraRecover in this state deadlocks the
+            // handoff: no producer owns the bridge, so no first frame can ever arrive.
+            if (!SceneTransportCoordinator.IsOwner(SceneTransportOwner.FreeCamera))
+            {
+                return true;
+            }
+
             RenderTargetInfo target;
             try
             {
