@@ -1,11 +1,5 @@
-using System.Collections.ObjectModel;
-using System.ComponentModel;
-using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Templates;
-using Avalonia.Data;
-using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -16,27 +10,12 @@ namespace U3DViewer.Viewer;
 internal sealed class MainWindow : Window
 {
     private readonly ViewerConnection _connection = new();
-    private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
-    private readonly HashSet<int> _expandedInstanceIds = new();
-    private readonly TreeView _hierarchy;
     private readonly TextBlock _connectionStatus;
     private readonly TextBlock _snapshotStatus;
     private readonly TextBlock _connectionDetail;
-    private readonly StackPanel _inspectorContent;
-    private readonly TextBlock _sceneStatus;
-    private readonly TextBlock _performanceStatus;
-    private readonly TextBlock _moveSpeedStatus;
-    private readonly NativeSceneHost _sceneHost;
-    private readonly TextBox _fovBox;
-    private readonly TextBox _nearBox;
-    private readonly TextBox _farBox;
-    private readonly TextBox _orthographicSizeBox;
-    private readonly TextBox _idleFpsBox;
-    private readonly TextBox _interactiveFpsBox;
-    private readonly TextBox _renderWidthBox;
-    private readonly TextBox _renderHeightBox;
-
-    private HierarchyNode? _selectedNode;
+    private readonly HierarchyPanel _hierarchyPanel;
+    private readonly InspectorPanel _inspectorPanel;
+    private readonly ScenePanel _scenePanel;
 
     public MainWindow()
     {
@@ -48,95 +27,33 @@ internal sealed class MainWindow : Window
 
         _connectionStatus = new TextBlock
         {
-            Text = "● Disconnected",
+            Text = Localization.T("main.disconnected"),
             VerticalAlignment = VerticalAlignment.Center,
             FontWeight = FontWeight.SemiBold
         };
-
         _snapshotStatus = new TextBlock
         {
-            Text = "No snapshot",
+            Text = Localization.T("main.noSnapshot"),
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Right
         };
-
         _connectionDetail = new TextBlock
         {
-            Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)",
+            Text = Localization.T("main.waitAgent"),
             VerticalAlignment = VerticalAlignment.Center
         };
 
-        _hierarchy = new TreeView
-        {
-            ItemsSource = _rootNodes,
-            SelectionMode = SelectionMode.Single,
-            ItemTemplate = new FuncTreeDataTemplate<HierarchyNode>(
-                BuildHierarchyHeader,
-                node => node.Children)
-        };
-        _hierarchy.SelectionChanged += OnHierarchySelectionChanged;
-        _hierarchy.AddHandler(TreeViewItem.ExpandedEvent, OnHierarchyExpanded);
-        _hierarchy.AddHandler(TreeViewItem.CollapsedEvent, OnHierarchyCollapsed);
+        _hierarchyPanel = new HierarchyPanel();
+        _inspectorPanel = new InspectorPanel();
+        _scenePanel = new ScenePanel(
+            this,
+            SendCommand,
+            () => _hierarchyPanel.SelectedInstanceId,
+            SetConnectionDetail);
 
-        _inspectorContent = new StackPanel
-        {
-            Margin = new Thickness(12),
-            Spacing = 6
-        };
-        RenderEmptyInspector();
-
-        _sceneStatus = new TextBlock
-        {
-            Text = "Waiting for the target game's Scene render target...",
-            TextWrapping = TextWrapping.Wrap,
-            TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 900,
-            Margin = new Thickness(14, 8, 14, 2)
-        };
-
-        _performanceStatus = new TextBlock
-        {
-            Text = "Perf · waiting for Agent metrics",
-            TextWrapping = TextWrapping.Wrap,
-            TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 1000,
-            Margin = new Thickness(14, 2, 14, 8),
-            FontSize = 12
-        };
-
-        _moveSpeedStatus = new TextBlock
-        {
-            Text = "Speed 10 u/s",
-            VerticalAlignment = VerticalAlignment.Center,
-            FontWeight = FontWeight.SemiBold
-        };
-
-        _fovBox = CreateValueTextBox("60");
-        _nearBox = CreateValueTextBox("0.001");
-        _farBox = CreateValueTextBox("10000");
-        _orthographicSizeBox = CreateValueTextBox("5");
-        _fovBox.LostFocus += (_, _) => ApplyLensFromControls();
-        _nearBox.LostFocus += (_, _) => ApplyLensFromControls();
-        _farBox.LostFocus += (_, _) => ApplyLensFromControls();
-        _orthographicSizeBox.LostFocus += (_, _) => ApplyLensFromControls();
-
-        _idleFpsBox = CreateValueTextBox("15");
-        _interactiveFpsBox = CreateValueTextBox("30");
-        _renderWidthBox = CreateValueTextBox("1280");
-        _renderHeightBox = CreateValueTextBox("720");
-
-        _sceneHost = new NativeSceneHost(SendCameraCommand, FocusSelected)
-        {
-            Margin = new Thickness(10, 0, 10, 0),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch
-        };
-        _sceneHost.StatusChanged += status => _sceneStatus.Text = status;
-        _sceneHost.MoveSpeedChanged += speed => _moveSpeedStatus.Text = $"Speed {speed:0.##} u/s";
+        _hierarchyPanel.SelectionChanged += OnHierarchySelectionChanged;
+        _hierarchyPanel.ExpansionChanged += (instanceId, expanded) =>
+            SendCommand(ViewerCommandCodec.EncodeHierarchyExpanded(instanceId, expanded));
 
         Content = BuildLayout();
 
@@ -145,10 +62,11 @@ internal sealed class MainWindow : Window
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
         Opened += (_, _) => _connection.Start();
-
         Closed += (_, _) =>
         {
-            _sceneHost.Shutdown();
+            _hierarchyPanel.Shutdown();
+            _inspectorPanel.Shutdown();
+            _scenePanel.Shutdown();
             _ = _connection.DisposeAsync().AsTask();
         };
     }
@@ -187,326 +105,32 @@ internal sealed class MainWindow : Window
         };
         Grid.SetRow(workspace, 1);
 
-        workspace.Children.Add(BuildHierarchyPanel());
+        workspace.Children.Add(_hierarchyPanel);
 
-        var scene = BuildScenePanel();
-        Grid.SetColumn(scene, 1);
-        workspace.Children.Add(scene);
+        Grid.SetColumn(_scenePanel, 1);
+        workspace.Children.Add(_scenePanel);
 
-        var inspector = BuildInspectorPanel();
-        Grid.SetColumn(inspector, 2);
-        workspace.Children.Add(inspector);
+        Grid.SetColumn(_inspectorPanel, 2);
+        workspace.Children.Add(_inspectorPanel);
 
         root.Children.Add(workspace);
         return root;
     }
 
-    private Control BuildHierarchyPanel()
+    private void OnHierarchySelectionChanged(int instanceId, GameObjectInfo? gameObject)
     {
-        var panel = new Grid
-        {
-            RowDefinitions = new RowDefinitions("Auto,*")
-        };
-
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Runtime Hierarchy",
-            FontSize = 15,
-            FontWeight = FontWeight.SemiBold,
-            Margin = new Thickness(10, 10, 10, 8)
-        });
-
-        var scroll = new ScrollViewer
-        {
-            Content = _hierarchy
-        };
-        Grid.SetRow(scroll, 1);
-        panel.Children.Add(scroll);
-
-        return new Border
-        {
-            BorderBrush = Brushes.Gray,
-            BorderThickness = new Thickness(0, 0, 1, 0),
-            Child = panel
-        };
+        SendCommand(ViewerCommandCodec.EncodeSelectObject(instanceId));
+        _inspectorPanel.Show(gameObject);
     }
 
-    private Control BuildScenePanel()
+    private void ApplySnapshot(SceneSnapshot snapshot)
     {
-        var panel = new Grid
-        {
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto")
-        };
+        _snapshotStatus.Text = Localization.Translate(
+            $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)");
 
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Scene View",
-            FontSize = 15,
-            FontWeight = FontWeight.SemiBold,
-            Margin = new Thickness(10, 10, 10, 8)
-        });
-
-        var toolbar = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
-            Margin = new Thickness(10, 0, 10, 6)
-        };
-        toolbar.Children.Add(CreateCommandButton("Reset Camera", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraReset())));
-        toolbar.Children.Add(CreateCommandButton("Perspective", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraProjection(false))));
-        toolbar.Children.Add(CreateCommandButton("Orthographic", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraProjection(true))));
-        toolbar.Children.Add(CreateCommandButton("Focus Selected", FocusSelected));
-        Grid.SetRow(toolbar, 1);
-        panel.Children.Add(toolbar);
-
-        var lensToolbar = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Margin = new Thickness(10, 0, 10, 8),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        lensToolbar.Children.Add(CreateValueField("FOV", _fovBox));
-        lensToolbar.Children.Add(CreateValueField("Near", _nearBox));
-        lensToolbar.Children.Add(CreateValueField("Far", _farBox));
-        lensToolbar.Children.Add(CreateValueField("Ortho Size", _orthographicSizeBox));
-        lensToolbar.Children.Add(CreateCommandButton("Apply Lens", ApplyLensFromControls));
-        Grid.SetRow(lensToolbar, 2);
-        panel.Children.Add(lensToolbar);
-
-        var streamToolbar = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Margin = new Thickness(10, 0, 10, 8),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        streamToolbar.Children.Add(CreateValueField("Idle FPS", _idleFpsBox));
-        streamToolbar.Children.Add(CreateValueField("Active FPS", _interactiveFpsBox));
-        streamToolbar.Children.Add(CreateValueField("Width", _renderWidthBox));
-        streamToolbar.Children.Add(CreateValueField("Height", _renderHeightBox));
-        streamToolbar.Children.Add(CreateCommandButton("Apply Stream", ApplyStreamFromControls));
-        streamToolbar.Children.Add(new Border { Width = 8 });
-        streamToolbar.Children.Add(_moveSpeedStatus);
-        Grid.SetRow(streamToolbar, 3);
-        panel.Children.Add(streamToolbar);
-
-        Grid.SetRow(_sceneHost, 4);
-        panel.Children.Add(_sceneHost);
-
-        var statusPanel = new StackPanel
-        {
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Children =
-            {
-                _sceneStatus,
-                _performanceStatus
-            }
-        };
-        var statusBorder = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(220, 24, 24, 24)),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Child = statusPanel
-        };
-        Grid.SetRow(statusBorder, 5);
-        panel.Children.Add(statusBorder);
-
-        return panel;
-    }
-
-    private Control BuildInspectorPanel()
-    {
-        var panel = new Grid
-        {
-            RowDefinitions = new RowDefinitions("Auto,*")
-        };
-
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Runtime Inspector",
-            FontSize = 15,
-            FontWeight = FontWeight.SemiBold,
-            Margin = new Thickness(10, 10, 10, 8)
-        });
-
-        var scroll = new ScrollViewer
-        {
-            Content = _inspectorContent
-        };
-        Grid.SetRow(scroll, 1);
-        panel.Children.Add(scroll);
-
-        return new Border
-        {
-            BorderBrush = Brushes.Gray,
-            BorderThickness = new Thickness(1, 0, 0, 0),
-            Child = panel
-        };
-    }
-
-    private static Button CreateCommandButton(string text, Action action)
-    {
-        var button = new Button { Content = text };
-        button.Click += (_, _) => action();
-        return button;
-    }
-
-    private static TextBox CreateValueTextBox(string text) => new()
-    {
-        Text = text,
-        Width = 72,
-        HorizontalContentAlignment = HorizontalAlignment.Right
-    };
-
-    private static Control CreateValueField(string label, TextBox textBox)
-    {
-        var panel = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 4,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        panel.Children.Add(new TextBlock
-        {
-            Text = label,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        panel.Children.Add(textBox);
-        return panel;
-    }
-
-    private static Control BuildHierarchyHeader(HierarchyNode node, INameScope _)
-    {
-        var text = new TextBlock();
-        text.Bind(TextBlock.TextProperty, new Binding(nameof(HierarchyNode.Label)));
-        return text;
-    }
-
-    private void FocusSelected()
-    {
-        if (_selectedNode?.InstanceId is int instanceId)
-        {
-            SendCameraCommand(ViewerCommandCodec.EncodeCameraFocus(instanceId));
-        }
-        else
-        {
-            _connectionDetail.Text = "Select a runtime GameObject before using Focus Selected.";
-        }
-    }
-
-    private void ApplyLensFromControls()
-    {
-        if (!TryParseFloat(_fovBox.Text, out var fov) ||
-            !TryParseFloat(_nearBox.Text, out var nearClip) ||
-            !TryParseFloat(_farBox.Text, out var farClip) ||
-            !TryParseFloat(_orthographicSizeBox.Text, out var orthographicSize) ||
-            fov < 1f || fov > 179f ||
-            orthographicSize <= 0f ||
-            farClip <= nearClip)
-        {
-            _connectionDetail.Text = "Invalid Scene lens values. FOV must be 1-179, Ortho Size > 0, and Far must be greater than Near.";
-            return;
-        }
-
-        SendCameraCommand(ViewerCommandCodec.EncodeCameraLens(fov, nearClip, farClip, orthographicSize));
-    }
-
-    private void ApplyStreamFromControls()
-    {
-        if (!TryParseFloat(_idleFpsBox.Text, out var idleFps) ||
-            !TryParseFloat(_interactiveFpsBox.Text, out var interactiveFps) ||
-            !int.TryParse(_renderWidthBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) ||
-            !int.TryParse(_renderHeightBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var height) ||
-            idleFps < 1f || idleFps > 120f ||
-            interactiveFps < 1f || interactiveFps > 120f ||
-            width < 64 || width > 4096 ||
-            height < 64 || height > 4096)
-        {
-            _connectionDetail.Text = "Invalid Scene stream values. FPS must be 1-120 and Width/Height must be 64-4096.";
-            return;
-        }
-
-        SendCameraCommand(ViewerCommandCodec.EncodeCameraStreamSettings(idleFps, interactiveFps, width, height));
-    }
-
-    private static bool TryParseFloat(string? text, out float value)
-    {
-        if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
-            float.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
-        {
-            return !float.IsNaN(value) && !float.IsInfinity(value);
-        }
-
-        value = 0f;
-        return false;
-    }
-
-    private void SyncLensControls(RenderTargetInfo? target)
-    {
-        if (target is null)
-        {
-            return;
-        }
-
-        SyncFloatText(_fovBox, target.FieldOfView);
-        SyncFloatText(_nearBox, target.NearClipPlane);
-        SyncFloatText(_farBox, target.FarClipPlane);
-        SyncFloatText(_orthographicSizeBox, target.OrthographicSize);
-    }
-
-    private void SyncStreamControls(RenderTargetInfo? target)
-    {
-        if (target is null)
-        {
-            return;
-        }
-
-        SyncFloatText(_idleFpsBox, target.IdleFps);
-        SyncFloatText(_interactiveFpsBox, target.InteractiveFps);
-        SyncIntegerText(_renderWidthBox, target.Width);
-        SyncIntegerText(_renderHeightBox, target.Height);
-        _moveSpeedStatus.Text = $"Speed {target.MoveSpeed:0.##} u/s";
-    }
-
-    private static void SyncFloatText(TextBox textBox, float value)
-    {
-        if (!textBox.IsFocused)
-        {
-            textBox.Text = value.ToString("0.######", CultureInfo.InvariantCulture);
-        }
-    }
-
-    private static void SyncIntegerText(TextBox textBox, int value)
-    {
-        if (!textBox.IsFocused)
-        {
-            textBox.Text = value.ToString(CultureInfo.InvariantCulture);
-        }
-    }
-
-    private void UpdatePerformanceStatus(PerformanceInfo performance)
-    {
-        var snapshotSize = performance.SnapshotBytes <= 0
-            ? "n/a"
-            : performance.SnapshotBytes >= 1024
-                ? $"{performance.SnapshotBytes / 1024.0:0.0} KB"
-                : $"{performance.SnapshotBytes} B";
-
-        _performanceStatus.Text =
-            $"Perf · Render {performance.SceneRenderMs:0.00} ms " +
-            $"(avg {performance.SceneRenderAverageMs:0.00}, max {performance.SceneRenderMaxMs:0.00}) · " +
-            $"Hierarchy {performance.HierarchyNodes} nodes / {performance.HierarchyScanMs:0.00} ms " +
-            $"(avg {performance.HierarchyScanAverageMs:0.00}, max {performance.HierarchyScanMaxMs:0.00}) · " +
-            $"JSON {performance.SnapshotSerializeMs:0.00} ms / {snapshotSize}";
-    }
-
-    private void SendCameraCommand(string command)
-    {
-        if (!_connection.TrySendCommand(command))
-        {
-            _connectionDetail.Text = "Camera command not sent: viewer is not connected to an agent.";
-        }
+        _hierarchyPanel.ApplyScenes(snapshot.Scenes);
+        _inspectorPanel.Show(_hierarchyPanel.SelectedGameObject);
+        _scenePanel.ApplySnapshot(snapshot.RenderTarget, snapshot.Performance);
     }
 
     private void UpdateConnectionState(ConnectionState state)
@@ -514,377 +138,37 @@ internal sealed class MainWindow : Window
         switch (state)
         {
             case ConnectionState.Connecting:
-                _connectionStatus.Text = "● Connecting";
+                _connectionStatus.Text = Localization.T("main.connecting");
                 _connectionStatus.Foreground = Brushes.Goldenrod;
-                _connectionDetail.Text = "Looking for the selected process Agent pipe";
+                _connectionDetail.Text = Localization.T("main.findPipe");
                 break;
+
             case ConnectionState.Connected:
-                _connectionStatus.Text = "● Connected";
+                _connectionStatus.Text = Localization.T("main.connected");
                 _connectionStatus.Foreground = Brushes.Green;
-                _connectionDetail.Text = "Receiving lazy hierarchy snapshots and GPU Scene Camera state";
+                _connectionDetail.Text = Localization.T("main.receiving");
                 break;
+
             default:
-                _connectionStatus.Text = "● Disconnected";
+                _connectionStatus.Text = Localization.T("main.disconnected");
                 _connectionStatus.Foreground = Brushes.Gray;
-                _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
-                _expandedInstanceIds.Clear();
-                _performanceStatus.Text = "Perf · waiting for Agent metrics";
-                _sceneHost.SetRenderTarget(null);
+                _connectionDetail.Text = Localization.T("main.waitAgent");
+                _hierarchyPanel.ResetConnectionState();
+                _scenePanel.SetDisconnected();
                 break;
         }
     }
 
-    private void ApplySnapshot(SceneSnapshot snapshot)
+    private void SendCommand(string command)
     {
-        _snapshotStatus.Text = $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)";
-        SyncLensControls(snapshot.RenderTarget);
-        SyncStreamControls(snapshot.RenderTarget);
-        UpdatePerformanceStatus(snapshot.Performance);
-        _sceneHost.SetRenderTarget(snapshot.RenderTarget);
-        SyncScenes(snapshot.Scenes);
-
-        if (_selectedNode?.GameObject is not null)
+        if (!_connection.TrySendCommand(command))
         {
-            RenderInspector(_selectedNode.GameObject);
+            _connectionDetail.Text = Localization.T("main.commandNotSent");
         }
     }
 
-    private void SyncScenes(IReadOnlyList<SceneInfo> scenes)
+    private void SetConnectionDetail(string text)
     {
-        var desiredKeys = new HashSet<string>();
-
-        for (var index = 0; index < scenes.Count; index++)
-        {
-            var scene = scenes[index];
-            var key = $"scene:{scene.BuildIndex}:{scene.Name}";
-            desiredKeys.Add(key);
-
-            var node = _rootNodes.FirstOrDefault(item => item.Key == key);
-            if (node is null)
-            {
-                node = new HierarchyNode(key, null, $"Scene: {scene.Name}");
-                _rootNodes.Insert(Math.Min(index, _rootNodes.Count), node);
-            }
-            else
-            {
-                var currentIndex = _rootNodes.IndexOf(node);
-                if (currentIndex != index && index < _rootNodes.Count)
-                {
-                    _rootNodes.Move(currentIndex, index);
-                }
-            }
-
-            node.Label = $"Scene: {scene.Name}  [build {scene.BuildIndex}]";
-            SyncGameObjects(node.Children, scene.Roots);
-        }
-
-        for (var index = _rootNodes.Count - 1; index >= 0; index--)
-        {
-            if (!desiredKeys.Contains(_rootNodes[index].Key))
-            {
-                _rootNodes.RemoveAt(index);
-            }
-        }
-
-        if (_selectedNode?.InstanceId is int selectedId)
-        {
-            var refreshed = FindByInstanceId(selectedId);
-            if (refreshed is null)
-            {
-                _selectedNode = null;
-                _hierarchy.SelectedItem = null;
-                RenderEmptyInspector();
-            }
-            else if (!ReferenceEquals(refreshed, _selectedNode))
-            {
-                _selectedNode = refreshed;
-                _hierarchy.SelectedItem = refreshed;
-            }
-        }
-    }
-
-    private void SyncGameObjects(ObservableCollection<HierarchyNode> target, IReadOnlyList<GameObjectInfo> objects)
-    {
-        if (objects.Count > 0)
-        {
-            RemovePlaceholders(target);
-        }
-
-        var desiredIds = new HashSet<int>();
-
-        for (var index = 0; index < objects.Count; index++)
-        {
-            var gameObject = objects[index];
-            desiredIds.Add(gameObject.InstanceId);
-
-            var node = target.FirstOrDefault(item => !item.IsPlaceholder && item.InstanceId == gameObject.InstanceId);
-            if (node is null)
-            {
-                node = new HierarchyNode($"go:{gameObject.InstanceId}", gameObject.InstanceId, gameObject.Name);
-                target.Insert(Math.Min(index, target.Count), node);
-            }
-            else
-            {
-                var currentIndex = target.IndexOf(node);
-                if (currentIndex != index && index < target.Count)
-                {
-                    target.Move(currentIndex, index);
-                }
-            }
-
-            node.GameObject = gameObject;
-            node.Label = gameObject.ActiveInHierarchy ? gameObject.Name : $"{gameObject.Name} (inactive)";
-
-            if (gameObject.Children.Length > 0)
-            {
-                SyncGameObjects(node.Children, gameObject.Children);
-            }
-            else if (gameObject.ChildCount > 0)
-            {
-                EnsurePlaceholder(node);
-            }
-            else
-            {
-                node.Children.Clear();
-            }
-        }
-
-        for (var index = target.Count - 1; index >= 0; index--)
-        {
-            var item = target[index];
-            if (item.IsPlaceholder)
-            {
-                continue;
-            }
-
-            if (item.InstanceId is int id && !desiredIds.Contains(id))
-            {
-                target.RemoveAt(index);
-            }
-        }
-    }
-
-    private static void RemovePlaceholders(ObservableCollection<HierarchyNode> children)
-    {
-        for (var index = children.Count - 1; index >= 0; index--)
-        {
-            if (children[index].IsPlaceholder)
-            {
-                children.RemoveAt(index);
-            }
-        }
-    }
-
-    private static void EnsurePlaceholder(HierarchyNode node)
-    {
-        if (node.Children.Any(child => !child.IsPlaceholder))
-        {
-            return;
-        }
-
-        if (node.Children.Count == 1 && node.Children[0].IsPlaceholder)
-        {
-            return;
-        }
-
-        node.Children.Clear();
-        node.Children.Add(HierarchyNode.Placeholder());
-    }
-
-    private void OnHierarchyExpanded(object? sender, RoutedEventArgs e)
-    {
-        if (e.Source is not TreeViewItem item || item.DataContext is not HierarchyNode node ||
-            node.IsPlaceholder || node.InstanceId is not int instanceId)
-        {
-            return;
-        }
-
-        if (_expandedInstanceIds.Add(instanceId))
-        {
-            SendCameraCommand(ViewerCommandCodec.EncodeHierarchyExpanded(instanceId, true));
-        }
-    }
-
-    private void OnHierarchyCollapsed(object? sender, RoutedEventArgs e)
-    {
-        if (e.Source is not TreeViewItem item || item.DataContext is not HierarchyNode node || node.IsPlaceholder)
-        {
-            return;
-        }
-
-        CollapseBranch(node);
-    }
-
-    private void CollapseBranch(HierarchyNode node)
-    {
-        if (node.InstanceId is int instanceId && _expandedInstanceIds.Remove(instanceId))
-        {
-            SendCameraCommand(ViewerCommandCodec.EncodeHierarchyExpanded(instanceId, false));
-        }
-
-        foreach (var child in node.Children)
-        {
-            if (!child.IsPlaceholder)
-            {
-                CollapseBranch(child);
-            }
-        }
-    }
-
-    private HierarchyNode? FindByInstanceId(int instanceId)
-    {
-        foreach (var root in _rootNodes)
-        {
-            var match = FindByInstanceId(root, instanceId);
-            if (match is not null)
-            {
-                return match;
-            }
-        }
-
-        return null;
-    }
-
-    private static HierarchyNode? FindByInstanceId(HierarchyNode node, int instanceId)
-    {
-        if (node.InstanceId == instanceId)
-        {
-            return node;
-        }
-
-        foreach (var child in node.Children)
-        {
-            if (child.IsPlaceholder)
-            {
-                continue;
-            }
-
-            var match = FindByInstanceId(child, instanceId);
-            if (match is not null)
-            {
-                return match;
-            }
-        }
-
-        return null;
-    }
-
-    private void OnHierarchySelectionChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (_hierarchy.SelectedItem is HierarchyNode node && !node.IsPlaceholder &&
-            node.GameObject is not null && node.InstanceId is int instanceId)
-        {
-            _selectedNode = node;
-            SendCameraCommand(ViewerCommandCodec.EncodeSelectObject(instanceId));
-            RenderInspector(node.GameObject);
-        }
-        else
-        {
-            _selectedNode = null;
-            SendCameraCommand(ViewerCommandCodec.EncodeSelectObject(0));
-            RenderEmptyInspector();
-        }
-    }
-
-    private void RenderEmptyInspector()
-    {
-        _inspectorContent.Children.Clear();
-        _inspectorContent.Children.Add(new TextBlock
-        {
-            Text = "Select a GameObject in Runtime Hierarchy.",
-            TextWrapping = TextWrapping.Wrap
-        });
-    }
-
-    private void RenderInspector(GameObjectInfo gameObject)
-    {
-        _inspectorContent.Children.Clear();
-
-        AddInspectorHeading(gameObject.Name, 20);
-        AddInspectorLine($"Instance ID: {gameObject.InstanceId}");
-        AddInspectorLine($"Active: {gameObject.ActiveInHierarchy}  (self: {gameObject.ActiveSelf})");
-        AddInspectorLine($"Children: {gameObject.ChildCount}");
-        AddInspectorLine($"Layer: {gameObject.Layer}");
-        AddInspectorLine($"Tag: {(string.IsNullOrWhiteSpace(gameObject.Tag) ? "<none>" : gameObject.Tag)}");
-
-        AddInspectorHeading("Transform", 15);
-        AddInspectorLine($"Position:       {FormatVector(gameObject.Transform.Position)}");
-        AddInspectorLine($"Local Position: {FormatVector(gameObject.Transform.LocalPosition)}");
-        AddInspectorLine($"Euler Angles:   {FormatVector(gameObject.Transform.EulerAngles)}");
-        AddInspectorLine($"Local Scale:    {FormatVector(gameObject.Transform.LocalScale)}");
-
-        AddInspectorHeading($"Components ({gameObject.Components.Length})", 15);
-        if (gameObject.Components.Length == 0)
-        {
-            AddInspectorLine("<none>");
-        }
-        else
-        {
-            foreach (var component in gameObject.Components)
-            {
-                AddInspectorLine(component);
-            }
-        }
-    }
-
-    private void AddInspectorHeading(string text, double size)
-    {
-        _inspectorContent.Children.Add(new TextBlock
-        {
-            Text = text,
-            FontSize = size,
-            FontWeight = FontWeight.SemiBold,
-            Margin = new Thickness(0, 8, 0, 2)
-        });
-    }
-
-    private void AddInspectorLine(string text)
-    {
-        _inspectorContent.Children.Add(new TextBlock
-        {
-            Text = text,
-            TextWrapping = TextWrapping.Wrap
-        });
-    }
-
-    private static string FormatVector(Vector3Info value) =>
-        $"({value.X:0.###}, {value.Y:0.###}, {value.Z:0.###})";
-
-    private sealed class HierarchyNode : INotifyPropertyChanged
-    {
-        private string _label;
-
-        public HierarchyNode(string key, int? instanceId, string label, bool isPlaceholder = false)
-        {
-            Key = key;
-            InstanceId = instanceId;
-            _label = label;
-            IsPlaceholder = isPlaceholder;
-        }
-
-        public static HierarchyNode Placeholder() => new("placeholder", null, "Loading...", true);
-
-        public string Key { get; }
-        public int? InstanceId { get; }
-        public bool IsPlaceholder { get; }
-        public ObservableCollection<HierarchyNode> Children { get; } = new();
-        public GameObjectInfo? GameObject { get; set; }
-
-        public string Label
-        {
-            get => _label;
-            set
-            {
-                if (_label == value)
-                {
-                    return;
-                }
-
-                _label = value;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
-            }
-        }
-
-        public event PropertyChangedEventHandler? PropertyChanged;
+        _connectionDetail.Text = text;
     }
 }
