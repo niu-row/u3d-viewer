@@ -2,6 +2,13 @@ using System.Globalization;
 
 namespace U3DViewer.Protocol;
 
+public enum SceneCullingMode
+{
+    All = 0,
+    MainCamera = 1,
+    Manual = 2
+}
+
 public enum ViewerCommandKind
 {
     CameraMove,
@@ -10,6 +17,7 @@ public enum ViewerCommandKind
     CameraProjection,
     CameraLens,
     CameraStreamSettings,
+    CameraCullingMask,
     CameraReset,
     CameraFocus,
     SelectObject,
@@ -18,7 +26,16 @@ public enum ViewerCommandKind
 
 public readonly struct ViewerCommand
 {
-    public ViewerCommand(ViewerCommandKind kind, float x = 0, float y = 0, float z = 0, float value = 0, int instanceId = 0, bool flag = false)
+    public ViewerCommand(
+        ViewerCommandKind kind,
+        float x = 0,
+        float y = 0,
+        float z = 0,
+        float value = 0,
+        int instanceId = 0,
+        bool flag = false,
+        SceneCullingMode cullingMode = SceneCullingMode.MainCamera,
+        int cullingMask = -1)
     {
         Kind = kind;
         X = x;
@@ -27,6 +44,8 @@ public readonly struct ViewerCommand
         Value = value;
         InstanceId = instanceId;
         Flag = flag;
+        CullingMode = cullingMode;
+        CullingMask = cullingMask;
     }
 
     public ViewerCommandKind Kind { get; }
@@ -36,6 +55,8 @@ public readonly struct ViewerCommand
     public float Value { get; }
     public int InstanceId { get; }
     public bool Flag { get; }
+    public SceneCullingMode CullingMode { get; }
+    public int CullingMask { get; }
 }
 
 public static class ViewerCommandCodec
@@ -63,6 +84,13 @@ public static class ViewerCommandCodec
             F(interactiveFps),
             width.ToString(CultureInfo.InvariantCulture),
             height.ToString(CultureInfo.InvariantCulture));
+
+    public static string EncodeCameraCulling(SceneCullingMode mode, int mask) =>
+        string.Join(
+            "\t",
+            "camera.culling",
+            ((int)mode).ToString(CultureInfo.InvariantCulture),
+            mask.ToString(CultureInfo.InvariantCulture));
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -145,6 +173,17 @@ public static class ViewerCommandCodec
                     interactiveFps,
                     width,
                     height);
+                return true;
+
+            case "camera.culling" when parts.Length == 3 &&
+                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var cullingModeValue) &&
+                int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var cullingMask) &&
+                cullingModeValue >= (int)SceneCullingMode.All &&
+                cullingModeValue <= (int)SceneCullingMode.Manual:
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraCullingMask,
+                    cullingMode: (SceneCullingMode)cullingModeValue,
+                    cullingMask: cullingMask);
                 return true;
 
             case "camera.reset" when parts.Length == 1:
