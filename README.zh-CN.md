@@ -173,6 +173,8 @@ Height          64-4096  默认 720
 
 Scene 镜头参数也可以直接调整，包括 FOV、Near / Far 裁剪面和 Orthographic Size。Perspective / Orthographic 切换由 Viewer 的独立 Scene Camera 管理，不必跟随游戏主相机的投影模式。
 
+Scene Camera 的 `cullingMask` 现在也可以独立选择：`所有` 会渲染全部 32 个 Unity Layer；`复制主相机` 会按 snapshot 刷新节奏跟随当前 `Camera.main.cullingMask`；`手动` 会打开 32 Layer 勾选窗口，并显示目标游戏实际定义的 Layer 名称。当前 32-bit mask 同时会以十六进制显示。为了保持现有行为不突然变化，默认仍然是 `复制主相机`。
+
 ## 性能指标
 
 Scene 底部会显示轻量性能指标，用于根据实际测量结果优化：
@@ -198,6 +200,7 @@ Scene 底部会显示轻量性能指标，用于根据实际测量结果优化�
 - 类 Unity Scene View 的飞行相机控制
 - 可调 Perspective / Orthographic Scene 镜头
 - 可调 Scene FPS 和 RenderTexture 分辨率
+- 可选 Scene Camera culling mask：所有 / 复制主相机 / 手动 Layer
 - 可见的飞行相机速度
 - 运行时性能指标
 - D3D11 命名共享纹理 Scene transport
