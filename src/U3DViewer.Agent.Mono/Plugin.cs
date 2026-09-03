@@ -2,6 +2,7 @@ using System.Diagnostics;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
+using U3DViewer.Protocol;
 using UnityEngine;
 
 namespace U3DViewer.Agent.Mono;
@@ -21,6 +22,8 @@ public sealed class Plugin : BaseUnityPlugin
     private SceneCameraController? _sceneCamera;
     private SceneScanner.SceneScanSession? _sceneScan;
     private Task<string>? _snapshotSerialization;
+    private SceneSnapshot? _pendingPublishedSnapshot;
+    private SceneSnapshot? _lastPublishedSnapshot;
     private float _nextSnapshotAt;
     private long _sequence;
     private int _selectedInstanceId;
@@ -41,6 +44,8 @@ public sealed class Plugin : BaseUnityPlugin
         _pipeServer.Start();
         _sceneScan = null;
         _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+        _lastPublishedSnapshot = null;
         _selectedInstanceId = 0;
         _nextSnapshotAt = 0f;
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution forced on for Viewer mode.");
@@ -51,8 +56,7 @@ public sealed class Plugin : BaseUnityPlugin
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
-            _sceneScan = null;
-            _snapshotSerialization = null;
+            ResetSnapshotState();
             _nextSnapshotAt = 0f;
             return;
         }
@@ -68,11 +72,12 @@ public sealed class Plugin : BaseUnityPlugin
         {
             try
             {
-                if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
+                if (command.Kind == ViewerCommandKind.SelectObject)
                 {
                     _selectedInstanceId = command.InstanceId;
                     _sceneScan = null;
                     _snapshotSerialization = null;
+                    _pendingPublishedSnapshot = null;
                     _nextSnapshotAt = 0f;
                     continue;
                 }
@@ -126,9 +131,11 @@ public sealed class Plugin : BaseUnityPlugin
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
 
-            // Snapshot data contains no live Unity objects after the incremental scan completes,
-            // so JSON construction can safely run away from the Unity main thread.
-            _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
+            var previous = _lastPublishedSnapshot;
+            _pendingPublishedSnapshot = snapshot;
+            _snapshotSerialization = Task.Run(() => previous is null
+                ? JsonSnapshotWriter.Write(snapshot)
+                : JsonSnapshotWriter.Write(SceneDeltaBuilder.Build(previous, snapshot)));
         }
         catch (Exception ex)
         {
@@ -146,17 +153,29 @@ public sealed class Plugin : BaseUnityPlugin
             return;
         }
 
+        var publishedSnapshot = _pendingPublishedSnapshot;
         _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+
         if (task.Status == TaskStatus.RanToCompletion)
         {
             pipeServer.Publish(task.Result);
+            _lastPublishedSnapshot = publishedSnapshot;
             return;
         }
 
         if (task.IsFaulted)
         {
-            LogSource.LogError($"Failed to serialize scene snapshot: {task.Exception?.GetBaseException().Message}");
+            LogSource.LogError($"Failed to serialize scene update: {task.Exception?.GetBaseException().Message}");
         }
+    }
+
+    private void ResetSnapshotState()
+    {
+        _sceneScan = null;
+        _snapshotSerialization = null;
+        _pendingPublishedSnapshot = null;
+        _lastPublishedSnapshot = null;
     }
 
     private void OnDestroy()
@@ -167,8 +186,7 @@ public sealed class Plugin : BaseUnityPlugin
             _runInBackgroundCaptured = false;
         }
 
-        _sceneScan = null;
-        _snapshotSerialization = null;
+        ResetSnapshotState();
         _sceneCamera?.Dispose();
         _sceneCamera = null;
         _pipeServer?.Dispose();
