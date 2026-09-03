@@ -40,11 +40,13 @@ internal sealed class SceneCameraController : IDisposable
     private float _nextFollowSourceLookupAt;
     private bool _followPosition;
     private bool _followRotation;
+    private bool _viewerVisible = true;
     private bool _bridgeReady;
     private IntPtr _renderEvent;
     private int _copyEventId;
     private int _dxgiFormat;
     private ulong _adapterLuid;
+    private int _nativeBridgeAbiVersion;
     private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
     private string _sourceProjectionInfo = "Source Camera: unavailable";
@@ -115,6 +117,20 @@ internal sealed class SceneCameraController : IDisposable
                 CopyFromGameCamera();
                 BoostInteractiveRender();
                 break;
+            case ViewerCommandKind.CameraRecover:
+                RecoverTransport();
+                break;
+            case ViewerCommandKind.CameraVisibility:
+                _viewerVisible = command.Flag;
+                if (_viewerVisible)
+                {
+                    BoostInteractiveRender();
+                }
+                else
+                {
+                    ResetSceneFps(Time.unscaledTime);
+                }
+                break;
             case ViewerCommandKind.CameraFocus:
             {
                 var target = FindGameObject(command.InstanceId);
@@ -132,6 +148,12 @@ internal sealed class SceneCameraController : IDisposable
     {
         EnsureCamera();
         var now = Time.unscaledTime;
+        if (!_viewerVisible)
+        {
+            ResetSceneFps(now);
+            return;
+        }
+
         if (!_bridgeReady || _camera is null || now < _nextRenderAt)
         {
             return;
@@ -176,6 +198,7 @@ internal sealed class SceneCameraController : IDisposable
             DxgiFormat = _dxgiFormat,
             AdapterLuid = _adapterLuid,
             AdapterName = _adapterName,
+            NativeBridgeAbiVersion = _nativeBridgeAbiVersion,
             Orthographic = camera?.orthographic ?? false,
             FieldOfView = camera?.fieldOfView ?? DefaultPerspectiveFov,
             NearClipPlane = camera?.nearClipPlane ?? MinPerspectiveNear,
@@ -223,14 +246,20 @@ internal sealed class SceneCameraController : IDisposable
         _idleFps = Mathf.Clamp(SanitizeFinite(idleFps, DefaultIdleFps), MinStreamFps, MaxStreamFps);
         _interactiveFps = Mathf.Clamp(SanitizeFinite(interactiveFps, DefaultInteractiveFps), MinStreamFps, MaxStreamFps);
 
-        width = Math.Clamp(width, MinRenderDimension, MaxRenderDimension);
-        height = Math.Clamp(height, MinRenderDimension, MaxRenderDimension);
+        width = Mathf.Clamp(width, MinRenderDimension, MaxRenderDimension);
+        height = Mathf.Clamp(height, MinRenderDimension, MaxRenderDimension);
 
         if (width != _renderWidth || height != _renderHeight)
         {
             RecreateRenderTexture(width, height);
         }
 
+        BoostInteractiveRender();
+    }
+
+    private void RecoverTransport()
+    {
+        RecreateRenderTexture(_renderWidth, _renderHeight);
         BoostInteractiveRender();
     }
 
@@ -304,6 +333,14 @@ internal sealed class SceneCameraController : IDisposable
 
         try
         {
+            _nativeBridgeAbiVersion = NativeBridge.U3DViewer_GetAbiVersion();
+            if (_nativeBridgeAbiVersion != NativeBridgeProtocol.AbiVersion)
+            {
+                _bridgeReady = false;
+                _renderStatus = $"NativeBridge ABI mismatch: game={_nativeBridgeAbiVersion}, viewer expects={NativeBridgeProtocol.AbiVersion}. Redeploy and restart the game.";
+                return;
+            }
+
             _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}.{_renderGeneration}";
             var nativeTexture = _renderTexture.GetNativeTexturePtr();
             if (nativeTexture == IntPtr.Zero)
@@ -330,11 +367,14 @@ internal sealed class SceneCameraController : IDisposable
         }
         catch (DllNotFoundException)
         {
+            _nativeBridgeAbiVersion = 0;
             _renderStatus = "U3DViewer.NativeBridge.dll was not found. Copy the x64 DLL next to the target game executable.";
         }
-        catch (EntryPointNotFoundException ex)
+        catch (EntryPointNotFoundException)
         {
-            _renderStatus = $"NativeBridge API mismatch: {ex.Message}";
+            _nativeBridgeAbiVersion = 0;
+            _bridgeReady = false;
+            _renderStatus = $"NativeBridge ABI is outdated. Viewer expects ABI {NativeBridgeProtocol.AbiVersion}. Redeploy and restart the game.";
         }
         catch (Exception ex)
         {
@@ -366,6 +406,13 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _sceneFps = elapsed > 0f ? _sceneFpsWindowFrames / elapsed : 0d;
+        _sceneFpsWindowStart = now;
+        _sceneFpsWindowFrames = 0;
+    }
+
+    private void ResetSceneFps(float now)
+    {
+        _sceneFps = 0d;
         _sceneFpsWindowStart = now;
         _sceneFpsWindowFrames = 0;
     }
