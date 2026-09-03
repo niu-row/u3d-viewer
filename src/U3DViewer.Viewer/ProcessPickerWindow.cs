@@ -187,10 +187,19 @@ internal sealed class ProcessPickerWindow : Window
         return grid;
     }
 
-    private static Control BuildProcessRow(UnityProcessInfo item)
+    private static Control BuildProcessRow(UnityProcessInfo? item)
     {
         var grid = CreateColumns();
         grid.Margin = new Thickness(4, 5);
+
+        // Avalonia can briefly ask a recycled item template to rebuild with a null item
+        // while the process collection is being cleared/refilled. Treat that as an empty row
+        // instead of turning a transient refresh state into a process-scan failure.
+        if (item is null)
+        {
+            return grid;
+        }
+
         AddCell(grid, item.ProcessName, 0);
         AddCell(grid, item.ProcessId.ToString(), 1);
         AddCell(grid, item.Backend, 2);
@@ -218,11 +227,11 @@ internal sealed class ProcessPickerWindow : Window
         ColumnDefinitions = new ColumnDefinitions("2*,80,100,120,3*")
     };
 
-    private static void AddCell(Grid grid, string text, int column, FontWeight? weight = null)
+    private static void AddCell(Grid grid, string? text, int column, FontWeight? weight = null)
     {
         var block = new TextBlock
         {
-            Text = text,
+            Text = text ?? string.Empty,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
             FontWeight = weight ?? FontWeight.Normal,
