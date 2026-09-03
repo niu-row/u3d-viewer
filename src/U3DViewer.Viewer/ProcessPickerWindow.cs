@@ -30,7 +30,7 @@ internal sealed class ProcessPickerWindow : Window
     {
         _connect = connect;
 
-        Title = "U3D Viewer - Select Unity Process";
+        Title = Localization.T("picker.title");
         Width = 1040;
         Height = 580;
         MinWidth = 820;
@@ -46,7 +46,7 @@ internal sealed class ProcessPickerWindow : Window
 
         _actionButton = new Button
         {
-            Content = "Select a process",
+            Content = Localization.T("picker.select"),
             IsEnabled = false,
             MinWidth = 140
         };
@@ -54,14 +54,14 @@ internal sealed class ProcessPickerWindow : Window
 
         _openGameButton = new Button
         {
-            Content = "Open Game…",
+            Content = Localization.T("picker.open"),
             MinWidth = 110
         };
         _openGameButton.Click += async (_, _) => await OpenGameAsync();
 
         _refreshButton = new Button
         {
-            Content = "Refresh",
+            Content = Localization.T("picker.refresh"),
             MinWidth = 90,
             Margin = new Thickness(8, 0)
         };
@@ -69,7 +69,7 @@ internal sealed class ProcessPickerWindow : Window
 
         _summary = new TextBlock
         {
-            Text = "Scanning running processes...",
+            Text = Localization.T("picker.scanning"),
             VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap
         };
@@ -115,7 +115,7 @@ internal sealed class ProcessPickerWindow : Window
 
         root.Children.Add(new TextBlock
         {
-            Text = "Select or launch a Unity game",
+            Text = Localization.T("picker.heading"),
             FontSize = 22,
             FontWeight = FontWeight.SemiBold,
             Margin = new Thickness(0, 0, 0, 4)
@@ -123,7 +123,7 @@ internal sealed class ProcessPickerWindow : Window
 
         var description = new TextBlock
         {
-            Text = "Choose a running Unity process or Open Game…. U3DViewer prepares BepInEx, builds or reuses the matching Agent, deploys it, launches/restarts the game, and connects automatically.",
+            Text = Localization.T("picker.description"),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
         };
@@ -179,11 +179,11 @@ internal sealed class ProcessPickerWindow : Window
     {
         var grid = CreateColumns();
         grid.Margin = new Thickness(8, 0, 8, 6);
-        AddCell(grid, "Process", 0, FontWeight.SemiBold);
+        AddCell(grid, Localization.T("picker.process"), 0, FontWeight.SemiBold);
         AddCell(grid, "PID", 1, FontWeight.SemiBold);
-        AddCell(grid, "Backend", 2, FontWeight.SemiBold);
-        AddCell(grid, "Agent", 3, FontWeight.SemiBold);
-        AddCell(grid, "Path", 4, FontWeight.SemiBold);
+        AddCell(grid, Localization.T("picker.backend"), 2, FontWeight.SemiBold);
+        AddCell(grid, Localization.T("picker.agent"), 3, FontWeight.SemiBold);
+        AddCell(grid, Localization.T("picker.path"), 4, FontWeight.SemiBold);
         return grid;
     }
 
@@ -192,9 +192,6 @@ internal sealed class ProcessPickerWindow : Window
         var grid = CreateColumns();
         grid.Margin = new Thickness(4, 5);
 
-        // Avalonia can briefly ask a recycled item template to rebuild with a null item
-        // while the process collection is being cleared/refilled. Treat that as an empty row
-        // instead of turning a transient refresh state into a process-scan failure.
         if (item is null)
         {
             return grid;
@@ -206,7 +203,7 @@ internal sealed class ProcessPickerWindow : Window
 
         var status = new TextBlock
         {
-            Text = item.AgentStatusText,
+            Text = Localization.Translate(item.AgentStatusText),
             Foreground = item.AgentStatus switch
             {
                 AgentProcessStatus.Ready => Brushes.Green,
@@ -266,12 +263,12 @@ internal sealed class ProcessPickerWindow : Window
             }
 
             var ready = items.Count(item => item.AgentStatus == AgentProcessStatus.Ready);
-            _summary.Text = $"Found {items.Count} Unity process(es) · {ready} ready";
+            SetSummary($"Found {items.Count} Unity process(es) · {ready} ready");
             UpdateSelection();
         }
         catch (Exception ex)
         {
-            _summary.Text = $"Process scan failed: {ex.Message}";
+            SetSummary($"Process scan failed: {ex.Message}");
             ViewerLog.Error("Process scan failed.", ex);
         }
         finally
@@ -290,7 +287,7 @@ internal sealed class ProcessPickerWindow : Window
 
         if (_list.SelectedItem is not UnityProcessInfo selected)
         {
-            _actionButton.Content = "Select a process";
+            _actionButton.Content = Localization.T("picker.select");
             _actionButton.IsEnabled = false;
             return;
         }
@@ -298,29 +295,29 @@ internal sealed class ProcessPickerWindow : Window
         switch (selected.AgentStatus)
         {
             case AgentProcessStatus.Ready:
-                _actionButton.Content = "Attach";
+                _actionButton.Content = Localization.T("picker.attach");
                 _actionButton.IsEnabled = true;
-                _summary.Text = $"{selected.ProcessName} · PID {selected.ProcessId} · Agent ready";
+                SetSummary($"{selected.ProcessName} · PID {selected.ProcessId} · Agent ready");
                 break;
 
             case AgentProcessStatus.Busy:
-                _actionButton.Content = "Agent Busy";
+                _actionButton.Content = Localization.T("picker.busy");
                 _actionButton.IsEnabled = false;
-                _summary.Text = "This Agent is already connected to another Viewer.";
+                SetSummary(Localization.T("picker.busyDetail"));
                 break;
 
             default:
                 if (GameAutomation.CanInstall(selected, out var reason))
                 {
-                    _actionButton.Content = "Prepare + Restart";
+                    _actionButton.Content = Localization.T("picker.prepare");
                     _actionButton.IsEnabled = true;
-                    _summary.Text = $"{selected.Backend} detected. U3DViewer can prepare the runtime and restart this game automatically.";
+                    SetSummary($"{selected.Backend} detected. U3DViewer can prepare the runtime and restart this game automatically.");
                 }
                 else
                 {
-                    _actionButton.Content = "Prepare unavailable";
+                    _actionButton.Content = Localization.T("picker.prepareUnavailable");
                     _actionButton.IsEnabled = false;
-                    _summary.Text = reason;
+                    SetSummary(reason);
                 }
                 break;
         }
@@ -360,11 +357,11 @@ internal sealed class ProcessPickerWindow : Window
 
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open Unity game",
+            Title = Localization.T("picker.openTitle"),
             AllowMultiple = false,
             FileTypeFilter = new[]
             {
-                new FilePickerFileType("Windows executable")
+                new FilePickerFileType(Localization.T("picker.exe"))
                 {
                     Patterns = new[] { "*.exe" }
                 }
@@ -392,11 +389,11 @@ internal sealed class ProcessPickerWindow : Window
         _refreshButton.IsEnabled = false;
         _list.IsEnabled = false;
         _operationStartedUtc = DateTime.UtcNow;
-        _operationMessage = "Starting runtime preparation...";
+        _operationMessage = Localization.T("picker.starting");
         _progressBar.IsVisible = true;
         _progressBar.IsIndeterminate = false;
         _progressBar.Value = 2;
-        _summary.Text = _operationMessage;
+        SetSummary(_operationMessage);
         _operationTimer.Start();
         ViewerLog.Info(_operationMessage);
 
@@ -413,8 +410,8 @@ internal sealed class ProcessPickerWindow : Window
             var result = await action(cancellation.Token, progress);
             if (result.Success && result.Target is not null)
             {
-                _operationMessage = "Agent ready. Opening Viewer...";
-                _summary.Text = _operationMessage;
+                _operationMessage = Localization.T("picker.readyOpening");
+                SetSummary(_operationMessage);
                 _progressBar.IsIndeterminate = false;
                 _progressBar.Value = 100;
                 ViewerLog.Info(_operationMessage);
@@ -422,20 +419,20 @@ internal sealed class ProcessPickerWindow : Window
                 return;
             }
 
-            terminalMessage = result.Message;
-            _summary.Text = terminalMessage;
-            ViewerLog.Error($"Runtime preparation failed: {terminalMessage}");
+            terminalMessage = Localization.Translate(result.Message);
+            SetSummary(terminalMessage);
+            ViewerLog.Error($"Runtime preparation failed: {result.Message}");
         }
         catch (OperationCanceledException)
         {
-            terminalMessage = "Operation timed out or was cancelled.";
-            _summary.Text = terminalMessage;
-            ViewerLog.Warning(terminalMessage);
+            terminalMessage = Localization.T("picker.timeout");
+            SetSummary(terminalMessage);
+            ViewerLog.Warning("Operation timed out or was cancelled.");
         }
         catch (Exception ex)
         {
-            terminalMessage = $"Operation failed: {ex.Message}";
-            _summary.Text = terminalMessage;
+            terminalMessage = Localization.Translate($"Operation failed: {ex.Message}");
+            SetSummary(terminalMessage);
             ViewerLog.Error("Runtime preparation threw an exception.", ex);
         }
         finally
@@ -453,7 +450,7 @@ internal sealed class ProcessPickerWindow : Window
                 await RefreshAsync();
                 if (!string.IsNullOrWhiteSpace(terminalMessage))
                 {
-                    _summary.Text = terminalMessage;
+                    SetSummary(terminalMessage);
                 }
             }
         }
@@ -482,7 +479,12 @@ internal sealed class ProcessPickerWindow : Window
 
         var elapsed = DateTime.UtcNow - _operationStartedUtc;
         var totalMinutes = (int)elapsed.TotalMinutes;
-        _summary.Text = $"{_operationMessage}  ·  {totalMinutes:00}:{elapsed.Seconds:00}";
+        SetSummary($"{_operationMessage}  ·  {totalMinutes:00}:{elapsed.Seconds:00}");
+    }
+
+    private void SetSummary(string text)
+    {
+        _summary.Text = Localization.Translate(text);
     }
 
     private static (double Value, bool Indeterminate) ResolveProgressState(string message)
