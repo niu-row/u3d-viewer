@@ -18,6 +18,7 @@ public enum ViewerCommandKind
     CameraLens,
     CameraStreamSettings,
     CameraCullingMask,
+    CameraFollowTransform,
     CameraReset,
     CameraFocus,
     SelectObject,
@@ -34,6 +35,7 @@ public readonly struct ViewerCommand
         float value = 0,
         int instanceId = 0,
         bool flag = false,
+        bool flag2 = false,
         SceneCullingMode cullingMode = SceneCullingMode.MainCamera,
         int cullingMask = -1)
     {
@@ -44,6 +46,7 @@ public readonly struct ViewerCommand
         Value = value;
         InstanceId = instanceId;
         Flag = flag;
+        Flag2 = flag2;
         CullingMode = cullingMode;
         CullingMask = cullingMask;
     }
@@ -55,6 +58,7 @@ public readonly struct ViewerCommand
     public float Value { get; }
     public int InstanceId { get; }
     public bool Flag { get; }
+    public bool Flag2 { get; }
     public SceneCullingMode CullingMode { get; }
     public int CullingMask { get; }
 }
@@ -91,6 +95,9 @@ public static class ViewerCommandCodec
             "camera.culling",
             ((int)mode).ToString(CultureInfo.InvariantCulture),
             mask.ToString(CultureInfo.InvariantCulture));
+
+    public static string EncodeCameraFollowTransform(bool position, bool rotation) =>
+        string.Join("\t", "camera.follow", position ? "1" : "0", rotation ? "1" : "0");
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -184,6 +191,15 @@ public static class ViewerCommandCodec
                     ViewerCommandKind.CameraCullingMask,
                     cullingMode: (SceneCullingMode)cullingModeValue,
                     cullingMask: cullingMask);
+                return true;
+
+            case "camera.follow" when parts.Length == 3 &&
+                (parts[1] == "0" || parts[1] == "1") &&
+                (parts[2] == "0" || parts[2] == "1"):
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraFollowTransform,
+                    flag: parts[1] == "1",
+                    flag2: parts[2] == "1");
                 return true;
 
             case "camera.reset" when parts.Length == 1:
