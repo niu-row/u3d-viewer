@@ -8,6 +8,7 @@
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net35'">
     <DefineConstants>$(DefineConstants);LEGACY_MONO</DefineConstants>
+    <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
 
   <ItemGroup>
