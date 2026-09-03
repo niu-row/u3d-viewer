@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using U3DViewer.Protocol;
 
 namespace U3DViewer.Viewer;
@@ -19,12 +20,16 @@ internal sealed class ViewerConnection : IAsyncDisposable
     {
         PropertyNameCaseInsensitive = true
     };
-    private readonly object _writerGate = new();
+    private readonly Channel<string> _commands = Channel.CreateBounded<string>(new BoundedChannelOptions(64)
+    {
+        SingleReader = true,
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest
+    });
     private readonly string _pipeName;
 
     private Task? _runTask;
     private ConnectionState _state = ConnectionState.Disconnected;
-    private StreamWriter? _writer;
 
     public ViewerConnection()
     {
@@ -48,24 +53,12 @@ internal sealed class ViewerConnection : IAsyncDisposable
 
     public bool TrySendCommand(string command)
     {
-        lock (_writerGate)
+        if (_state != ConnectionState.Connected || string.IsNullOrWhiteSpace(command))
         {
-            if (_writer is null)
-            {
-                return false;
-            }
-
-            try
-            {
-                _writer.WriteLine(command);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Error?.Invoke(ex);
-                return false;
-            }
+            return false;
         }
+
+        return _commands.Writer.TryWrite(command);
     }
 
     private async Task RunAsync(CancellationToken cancellationToken)
@@ -81,42 +74,58 @@ internal sealed class ViewerConnection : IAsyncDisposable
                     _pipeName,
                     PipeDirection.InOut,
                     PipeOptions.Asynchronous);
-
                 await pipe.ConnectAsync(1000, cancellationToken);
 
                 using var reader = new StreamReader(pipe, Encoding.UTF8, true, 16 * 1024, leaveOpen: true);
                 using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
                 {
-                    AutoFlush = true
+                    AutoFlush = false
                 };
-
-                lock (_writerGate)
-                {
-                    _writer = writer;
-                }
+                using var connectionShutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
                 SetState(ConnectionState.Connected);
+                var writerTask = PumpCommandsAsync(writer, connectionShutdown.Token);
 
-                while (!cancellationToken.IsCancellationRequested && pipe.IsConnected)
+                try
                 {
-                    var line = await reader.ReadLineAsync(cancellationToken);
-                    if (line is null)
+                    while (!cancellationToken.IsCancellationRequested && pipe.IsConnected)
                     {
-                        break;
-                    }
-
-                    try
-                    {
-                        var snapshot = JsonSerializer.Deserialize<SceneSnapshot>(line, _jsonOptions);
-                        if (snapshot is not null)
+                        var line = await reader.ReadLineAsync(cancellationToken);
+                        if (line is null)
                         {
-                            SnapshotReceived?.Invoke(snapshot);
+                            break;
+                        }
+
+                        try
+                        {
+                            var snapshot = JsonSerializer.Deserialize<SceneSnapshot>(line, _jsonOptions);
+                            if (snapshot is not null)
+                            {
+                                SnapshotReceived?.Invoke(snapshot);
+                            }
+                        }
+                        catch (JsonException ex)
+                        {
+                            Error?.Invoke(ex);
                         }
                     }
-                    catch (JsonException ex)
+                }
+                finally
+                {
+                    connectionShutdown.Cancel();
+                    try
                     {
-                        Error?.Invoke(ex);
+                        await writerTask;
                     }
+                    catch (OperationCanceledException)
+                    {
+                        // Normal when the pipe disconnects or Viewer shuts down.
+                    }
+                    catch (IOException)
+                    {
+                        // The reader side already observed the disconnect.
+                    }
+                    DrainPendingCommands();
                 }
             }
             catch (TimeoutException)
@@ -137,10 +146,6 @@ internal sealed class ViewerConnection : IAsyncDisposable
             }
             finally
             {
-                lock (_writerGate)
-                {
-                    _writer = null;
-                }
                 SetState(ConnectionState.Disconnected);
             }
 
@@ -152,6 +157,31 @@ internal sealed class ViewerConnection : IAsyncDisposable
             {
                 break;
             }
+        }
+    }
+
+    private async Task PumpCommandsAsync(StreamWriter writer, CancellationToken cancellationToken)
+    {
+        while (await _commands.Reader.WaitToReadAsync(cancellationToken))
+        {
+            var wroteAny = false;
+            while (_commands.Reader.TryRead(out var command))
+            {
+                await writer.WriteLineAsync(command.AsMemory(), cancellationToken);
+                wroteAny = true;
+            }
+
+            if (wroteAny)
+            {
+                await writer.FlushAsync(cancellationToken);
+            }
+        }
+    }
+
+    private void DrainPendingCommands()
+    {
+        while (_commands.Reader.TryRead(out _))
+        {
         }
     }
 
@@ -168,6 +198,7 @@ internal sealed class ViewerConnection : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _commands.Writer.TryComplete();
         _shutdown.Cancel();
 
         if (_runTask is not null)
