@@ -32,6 +32,7 @@ namespace
     ComPtr<ID3D11Device> g_device;
     ComPtr<ID3D11DeviceContext> g_context;
     ComPtr<IDXGIKeyedMutex> g_sharedMutex;
+    HANDLE g_sharedHandle = nullptr;
     std::wstring g_sharedName;
     LUID g_sourceAdapterLuid{};
     std::wstring g_sourceAdapterName;
@@ -126,6 +127,11 @@ namespace
     void ResetWriterResourceLocked(bool clearAdapterInfo = false)
     {
         g_sharedMutex.Reset();
+        if (g_sharedHandle != nullptr)
+        {
+            CloseHandle(g_sharedHandle);
+            g_sharedHandle = nullptr;
+        }
         g_sharedTexture.Reset();
         g_context.Reset();
         g_device.Reset();
@@ -237,7 +243,7 @@ namespace
             return E_POINTER;
         }
 
-        if (g_sharedTexture)
+        if (g_sharedTexture && g_sharedHandle != nullptr)
         {
             return S_OK;
         }
@@ -294,21 +300,21 @@ namespace
             return hr;
         }
 
-        HANDLE sharedHandle = nullptr;
         hr = dxgiResource->CreateSharedHandle(
             nullptr,
             DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
             g_sharedName.c_str(),
-            &sharedHandle);
+            &g_sharedHandle);
         if (FAILED(hr))
         {
             ResetWriterResourceLocked();
             return hr;
         }
 
-        if (sharedHandle != nullptr)
+        if (g_sharedHandle == nullptr)
         {
-            CloseHandle(sharedHandle);
+            ResetWriterResourceLocked();
+            return E_HANDLE;
         }
 
         hr = g_sharedTexture.As(&g_sharedMutex);
