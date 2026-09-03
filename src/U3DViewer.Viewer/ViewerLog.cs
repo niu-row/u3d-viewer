@@ -14,13 +14,9 @@ internal static class ViewerLog
         try
         {
             Console.OutputEncoding = Encoding.UTF8;
-            var directory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "U3DViewer",
-                "Logs");
-            Directory.CreateDirectory(directory);
+            Directory.CreateDirectory(ViewerPaths.ViewerLogsDirectory);
             _logPath = Path.Combine(
-                directory,
+                ViewerPaths.ViewerLogsDirectory,
                 $"viewer-{DateTime.Now:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
         }
         catch
@@ -34,6 +30,50 @@ internal static class ViewerLog
         if (!string.IsNullOrWhiteSpace(_logPath))
         {
             Info($"Log file: {_logPath}");
+        }
+    }
+
+    public static void BindToGame(string executablePath)
+    {
+        string? newPath = null;
+        lock (Sync)
+        {
+            try
+            {
+                var directory = ViewerPaths.GetGameLogsDirectory(executablePath);
+                Directory.CreateDirectory(directory);
+
+                var fileName = string.IsNullOrWhiteSpace(_logPath)
+                    ? $"viewer-{DateTime.Now:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log"
+                    : Path.GetFileName(_logPath);
+                newPath = Path.Combine(directory, fileName);
+
+                if (!string.IsNullOrWhiteSpace(_logPath) &&
+                    File.Exists(_logPath) &&
+                    !string.Equals(_logPath, newPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(_logPath, newPath, overwrite: true);
+                    try
+                    {
+                        File.Delete(_logPath);
+                    }
+                    catch
+                    {
+                        // The old startup log can remain if Windows briefly keeps it open.
+                    }
+                }
+
+                _logPath = newPath;
+            }
+            catch
+            {
+                newPath = null;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(newPath))
+        {
+            Info($"Log file moved to game data directory: {newPath}");
         }
     }
 
