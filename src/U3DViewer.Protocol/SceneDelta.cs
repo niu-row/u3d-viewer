@@ -31,12 +31,26 @@ public static class SceneDeltaBuilder
             .Where(instanceId => !currentNodes.ContainsKey(instanceId))
             .ToArray();
         var upserts = new List<SceneNodeDelta>();
+        var forcedSubtree = new HashSet<int>();
 
         foreach (var entry in currentNodes.OrderBy(item => item.Value.Order))
         {
-            if (!previousNodes.TryGetValue(entry.Key, out var oldNode) || !Equivalent(oldNode, entry.Value))
+            var node = entry.Value;
+            var hasPrevious = previousNodes.TryGetValue(entry.Key, out var oldNode);
+            var parentWasForced = node.ParentInstanceId != 0 && forcedSubtree.Contains(node.ParentInstanceId);
+            var structurallyChanged = !hasPrevious || oldNode is null ||
+                oldNode.SceneBuildIndex != node.SceneBuildIndex ||
+                !string.Equals(oldNode.SceneName, node.SceneName, StringComparison.Ordinal) ||
+                oldNode.ParentInstanceId != node.ParentInstanceId;
+            var force = parentWasForced || structurallyChanged;
+
+            if (force)
             {
-                var node = entry.Value;
+                forcedSubtree.Add(entry.Key);
+            }
+
+            if (force || oldNode is null || !Equivalent(oldNode, node))
+            {
                 upserts.Add(new SceneNodeDelta
                 {
                     InstanceId = entry.Key,
