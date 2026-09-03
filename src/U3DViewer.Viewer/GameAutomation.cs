@@ -7,6 +7,7 @@ internal sealed record GameAutomationResult(bool Success, string Message, UnityP
 internal static class GameAutomation
 {
     private static readonly TimeSpan AgentStartupTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan BepInExStartupProbeTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan GracefulCloseTimeout = TimeSpan.FromSeconds(10);
 
     public static bool CanInstall(UnityProcessInfo target, out string reason) =>
@@ -111,7 +112,7 @@ internal static class GameAutomation
         }
 
         progress?.Report("Launching game and waiting for U3DViewer Agent...");
-        return await StartAndWaitAsync(executablePath, progress, cancellationToken);
+        return await StartAndWaitAsync(executablePath, backend, progress, cancellationToken);
     }
 
     private static GameAutomationResult Deploy(
@@ -202,63 +203,165 @@ internal static class GameAutomation
 
     private static async Task<GameAutomationResult> StartAndWaitAsync(
         string executablePath,
+        string backend,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
         var gameDirectory = Path.GetDirectoryName(executablePath)!;
-        var bepinexLogPath = Path.Combine(gameDirectory, "BepInEx", "LogOutput.log");
-        Process? process;
+        var legacyProxyAttempted = false;
 
+        while (true)
+        {
+            var process = StartGame(executablePath, gameDirectory, out var launchError);
+            if (process is null)
+            {
+                return new GameAutomationResult(false, launchError);
+            }
+
+            using (process)
+            {
+                var logDescription = DescribeBepInExLog(gameDirectory);
+                progress?.Report(
+                    $"Game process started (PID {process.Id}). Waiting for Agent pipe. BepInEx log: {logDescription}");
+
+                var startedAt = DateTime.UtcNow;
+                var deadline = startedAt + AgentStartupTimeout;
+                var retryWithLegacyProxy = false;
+
+                while (DateTime.UtcNow < deadline)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var target = UnityProcessDiscovery.Scan().FirstOrDefault(item =>
+                        item.ProcessId == process.Id ||
+                        string.Equals(item.ExecutablePath, executablePath, StringComparison.OrdinalIgnoreCase));
+
+                    if (target?.AgentStatus == AgentProcessStatus.Ready)
+                    {
+                        return new GameAutomationResult(true, "Agent is ready.", target);
+                    }
+
+                    if (process.HasExited && target is null)
+                    {
+                        return new GameAutomationResult(
+                            false,
+                            $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}). " +
+                            $"BepInEx diagnostics: {DescribeBepInExLog(gameDirectory)}");
+                    }
+
+                    if (backend == "Mono" &&
+                        !legacyProxyAttempted &&
+                        DateTime.UtcNow - startedAt >= BepInExStartupProbeTimeout &&
+                        !HasBepInExLog(gameDirectory))
+                    {
+                        legacyProxyAttempted = true;
+                        progress?.Report(
+                            "BepInEx did not create a log within 8 seconds. Doorstop may not be loading through winhttp.dll on this older Unity game. Trying the legacy version.dll proxy...");
+
+                        await StopLaunchedProcessAsync(process, cancellationToken);
+                        if (!BepInExBootstrap.TryEnableLegacyMonoDoorstopProxy(executablePath, out var proxyMessage))
+                        {
+                            return new GameAutomationResult(
+                                false,
+                                $"BepInEx did not initialize and the legacy Doorstop fallback could not be applied. {proxyMessage}");
+                        }
+
+                        progress?.Report(proxyMessage + " Relaunching the game...");
+                        retryWithLegacyProxy = true;
+                        break;
+                    }
+
+                    await Task.Delay(500, cancellationToken);
+                }
+
+                if (retryWithLegacyProxy)
+                {
+                    continue;
+                }
+
+                return new GameAutomationResult(
+                    false,
+                    $"Game started, but the Agent did not become ready within 60 seconds. " +
+                    $"BepInEx diagnostics: {DescribeBepInExLog(gameDirectory)}");
+            }
+        }
+    }
+
+    private static Process? StartGame(string executablePath, string gameDirectory, out string error)
+    {
+        error = string.Empty;
         try
         {
-            process = Process.Start(new ProcessStartInfo
+            var process = Process.Start(new ProcessStartInfo
             {
                 FileName = executablePath,
                 WorkingDirectory = gameDirectory,
                 UseShellExecute = true
             });
+            if (process is null)
+            {
+                error = "Windows did not return a process for the launched game.";
+            }
+            return process;
         }
         catch (Exception ex)
         {
-            return new GameAutomationResult(false, $"Game launch failed: {ex.Message}");
+            error = $"Game launch failed: {ex.Message}";
+            return null;
+        }
+    }
+
+    private static bool HasBepInExLog(string gameDirectory) =>
+        File.Exists(Path.Combine(gameDirectory, "BepInEx", "LogOutput.log")) ||
+        File.Exists(Path.Combine(gameDirectory, "BepInEx", "LogOutput.txt"));
+
+    private static string DescribeBepInExLog(string gameDirectory)
+    {
+        var logPath = Path.Combine(gameDirectory, "BepInEx", "LogOutput.log");
+        if (File.Exists(logPath))
+        {
+            return logPath;
         }
 
-        if (process is null)
+        var textPath = Path.Combine(gameDirectory, "BepInEx", "LogOutput.txt");
+        if (File.Exists(textPath))
         {
-            return new GameAutomationResult(false, "Windows did not return a process for the launched game.");
+            return textPath;
         }
 
-        progress?.Report($"Game process started (PID {process.Id}). Waiting for Agent pipe. BepInEx log: {bepinexLogPath}");
+        return $"no LogOutput.log/.txt created yet under {Path.Combine(gameDirectory, "BepInEx")}";
+    }
 
-        using (process)
+    private static async Task StopLaunchedProcessAsync(Process process, CancellationToken cancellationToken)
+    {
+        if (process.HasExited)
         {
-            var deadline = DateTime.UtcNow + AgentStartupTimeout;
-            while (DateTime.UtcNow < deadline)
+            return;
+        }
+
+        try
+        {
+            if (process.CloseMainWindow())
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var target = UnityProcessDiscovery.Scan().FirstOrDefault(item =>
-                    item.ProcessId == process.Id ||
-                    string.Equals(item.ExecutablePath, executablePath, StringComparison.OrdinalIgnoreCase));
-
-                if (target?.AgentStatus == AgentProcessStatus.Ready)
+                var waitTask = process.WaitForExitAsync(cancellationToken);
+                var completed = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(5), cancellationToken));
+                if (completed == waitTask)
                 {
-                    return new GameAutomationResult(true, "Agent is ready.", target);
+                    await waitTask;
+                    return;
                 }
-
-                if (process.HasExited && target is null)
-                {
-                    return new GameAutomationResult(
-                        false,
-                        $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}). BepInEx log: {bepinexLogPath}");
-                }
-
-                await Task.Delay(500, cancellationToken);
             }
 
-            return new GameAutomationResult(
-                false,
-                $"Game started, but the Agent did not become ready within 60 seconds. BepInEx log: {bepinexLogPath}");
+            if (!process.HasExited)
+            {
+                // This process was launched by U3DViewer specifically for this preparation attempt.
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(cancellationToken);
+            }
+        }
+        catch
+        {
+            // The following proxy switch/relaunch will report a useful error if the process still holds the DLL.
         }
     }
 }
