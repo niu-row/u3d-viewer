@@ -31,6 +31,7 @@ internal sealed class SceneCameraController : IDisposable
     private Camera? _camera;
     private Camera? _followSourceCamera;
     private RenderTexture? _renderTexture;
+    private RenderTexture? _transportTexture;
     private float _moveSpeed = 10f;
     private float _idleFps = DefaultIdleFps;
     private float _interactiveFps = DefaultInteractiveFps;
@@ -169,7 +170,7 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
-        if (!_bridgeReady || _camera is null || now < _nextRenderAt)
+        if (!_bridgeReady || _camera is null || _renderTexture is null || _transportTexture is null || now < _nextRenderAt)
         {
             return;
         }
@@ -183,6 +184,7 @@ internal sealed class SceneCameraController : IDisposable
         try
         {
             _camera.Render();
+            Graphics.Blit(_renderTexture, _transportTexture);
             GL.IssuePluginEvent(_renderEvent, _copyEventId);
             RecordRenderTiming(ElapsedMilliseconds(started));
             RecordRenderFrame(now);
@@ -255,7 +257,7 @@ internal sealed class SceneCameraController : IDisposable
         _camera.farClipPlane = DefaultPerspectiveFar;
         _camera.fieldOfView = DefaultPerspectiveFov;
 
-        CreateRenderTexture(_renderWidth, _renderHeight);
+        CreateRenderTextures(_renderWidth, _renderHeight);
         CopyFromGameCamera();
         TryInitializeBridge();
     }
@@ -296,7 +298,7 @@ internal sealed class SceneCameraController : IDisposable
 
         try
         {
-            NativeBridge.U3DViewer_Reset();
+            SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.FreeCamera);
         }
         catch
         {
@@ -304,42 +306,54 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _camera.targetTexture = null;
-        ReleaseRenderTexture();
+        ReleaseRenderTextures();
         _renderWidth = width;
         _renderHeight = height;
         _renderGeneration++;
-        CreateRenderTexture(width, height);
+        CreateRenderTextures(width, height);
         TryInitializeBridge();
     }
 
-    private void CreateRenderTexture(int width, int height)
+    private void CreateRenderTextures(int width, int height)
     {
         _renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
         {
             name = "__U3DViewerRenderTexture"
         };
         _renderTexture.Create();
+
+        _transportTexture = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32)
+        {
+            name = "__U3DViewerTransportTexture"
+        };
+        _transportTexture.Create();
+
         if (_camera is not null)
         {
             _camera.targetTexture = _renderTexture;
         }
     }
 
-    private void ReleaseRenderTexture()
+    private void ReleaseRenderTextures()
     {
-        if (_renderTexture is null)
+        if (_renderTexture is not null)
         {
-            return;
+            _renderTexture.Release();
+            UnityEngine.Object.Destroy(_renderTexture);
+            _renderTexture = null;
         }
 
-        _renderTexture.Release();
-        UnityEngine.Object.Destroy(_renderTexture);
-        _renderTexture = null;
+        if (_transportTexture is not null)
+        {
+            _transportTexture.Release();
+            UnityEngine.Object.Destroy(_transportTexture);
+            _transportTexture = null;
+        }
     }
 
     private void TryInitializeBridge()
     {
-        if (_renderTexture is null)
+        if (_transportTexture is null)
         {
             return;
         }
@@ -361,16 +375,16 @@ internal sealed class SceneCameraController : IDisposable
             }
 
             _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}.{_renderGeneration}";
-            var nativeTexture = _renderTexture.GetNativeTexturePtr();
+            var nativeTexture = _transportTexture.GetNativeTexturePtr();
             if (nativeTexture == IntPtr.Zero)
             {
-                _renderStatus = "RenderTexture returned a null native texture pointer.";
+                _renderStatus = "Transport RenderTexture returned a null native texture pointer.";
                 return;
             }
 
             if (NativeBridge.U3DViewer_SetSourceTexture(nativeTexture, _sharedName) == 0)
             {
-                _renderStatus = $"NativeBridge rejected the RenderTexture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
+                _renderStatus = $"NativeBridge rejected the transport RenderTexture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
                 return;
             }
 
@@ -381,7 +395,7 @@ internal sealed class SceneCameraController : IDisposable
             _adapterName = SystemInfo.graphicsDeviceName ?? string.Empty;
             _bridgeReady = _renderEvent != IntPtr.Zero;
             _renderStatus = _bridgeReady
-                ? $"D3D11 shared Scene render target is ready on {DisplayAdapterName(_adapterName)}."
+                ? $"D3D11 shared Scene transport target is ready on {DisplayAdapterName(_adapterName)}."
                 : "NativeBridge did not return a render event callback.";
         }
         catch (DllNotFoundException)
@@ -789,7 +803,7 @@ internal sealed class SceneCameraController : IDisposable
     {
         try
         {
-            NativeBridge.U3DViewer_Reset();
+            SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.FreeCamera);
         }
         catch
         {
@@ -802,7 +816,7 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _followSourceCamera = null;
-        ReleaseRenderTexture();
+        ReleaseRenderTextures();
 
         if (_cameraObject is not null)
         {
