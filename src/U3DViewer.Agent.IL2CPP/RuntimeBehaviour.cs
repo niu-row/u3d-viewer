@@ -50,6 +50,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             }
         }
 
+        _sceneCamera?.TickRender();
+
         if (Time.unscaledTime < _nextSnapshotAt)
         {
             return;
@@ -60,6 +62,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         try
         {
             var snapshot = SceneScanner.Capture(++_sequence);
+            snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)

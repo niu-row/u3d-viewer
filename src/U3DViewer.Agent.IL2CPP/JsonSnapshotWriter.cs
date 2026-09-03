@@ -13,6 +13,9 @@ internal static class JsonSnapshotWriter
         Property(sb, "type", snapshot.Type); sb.Append(',');
         NumberProperty(sb, "sequence", snapshot.Sequence); sb.Append(',');
         NumberProperty(sb, "unixTimeMs", snapshot.UnixTimeMs); sb.Append(',');
+        sb.Append("\"renderTarget\":");
+        WriteRenderTarget(sb, snapshot.RenderTarget);
+        sb.Append(',');
         sb.Append("\"scenes\":[");
         for (var i = 0; i < snapshot.Scenes.Length; i++)
         {
@@ -21,6 +24,24 @@ internal static class JsonSnapshotWriter
         }
         sb.Append("]}");
         return sb.ToString();
+    }
+
+    private static void WriteRenderTarget(StringBuilder sb, RenderTargetInfo? target)
+    {
+        if (target is null)
+        {
+            sb.Append("null");
+            return;
+        }
+
+        sb.Append('{');
+        BoolProperty(sb, "available", target.Available); sb.Append(',');
+        Property(sb, "sharedName", target.SharedName); sb.Append(',');
+        NumberProperty(sb, "width", target.Width); sb.Append(',');
+        NumberProperty(sb, "height", target.Height); sb.Append(',');
+        NumberProperty(sb, "dxgiFormat", target.DxgiFormat); sb.Append(',');
+        Property(sb, "status", target.Status);
+        sb.Append('}');
     }
 
     private static void WriteScene(StringBuilder sb, SceneInfo scene)
@@ -38,27 +59,27 @@ internal static class JsonSnapshotWriter
         sb.Append("]}");
     }
 
-    private static void WriteGameObject(StringBuilder sb, GameObjectInfo gameObject)
+    private static void WriteGameObject(StringBuilder sb, GameObjectInfo go)
     {
         sb.Append('{');
-        NumberProperty(sb, "instanceId", gameObject.InstanceId); sb.Append(',');
-        Property(sb, "name", gameObject.Name); sb.Append(',');
-        BoolProperty(sb, "activeSelf", gameObject.ActiveSelf); sb.Append(',');
-        BoolProperty(sb, "activeInHierarchy", gameObject.ActiveInHierarchy); sb.Append(',');
-        NumberProperty(sb, "layer", gameObject.Layer); sb.Append(',');
-        Property(sb, "tag", gameObject.Tag); sb.Append(',');
-        sb.Append("\"transform\":"); WriteTransform(sb, gameObject.Transform); sb.Append(',');
+        NumberProperty(sb, "instanceId", go.InstanceId); sb.Append(',');
+        Property(sb, "name", go.Name); sb.Append(',');
+        BoolProperty(sb, "activeSelf", go.ActiveSelf); sb.Append(',');
+        BoolProperty(sb, "activeInHierarchy", go.ActiveInHierarchy); sb.Append(',');
+        NumberProperty(sb, "layer", go.Layer); sb.Append(',');
+        Property(sb, "tag", go.Tag); sb.Append(',');
+        sb.Append("\"transform\":"); WriteTransform(sb, go.Transform); sb.Append(',');
         sb.Append("\"components\":[");
-        for (var i = 0; i < gameObject.Components.Length; i++)
+        for (var i = 0; i < go.Components.Length; i++)
         {
             if (i > 0) sb.Append(',');
-            String(sb, gameObject.Components[i]);
+            String(sb, go.Components[i]);
         }
         sb.Append("],\"children\":[");
-        for (var i = 0; i < gameObject.Children.Length; i++)
+        for (var i = 0; i < go.Children.Length; i++)
         {
             if (i > 0) sb.Append(',');
-            WriteGameObject(sb, gameObject.Children[i]);
+            WriteGameObject(sb, go.Children[i]);
         }
         sb.Append("]}");
     }

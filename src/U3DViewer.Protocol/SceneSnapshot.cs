@@ -5,7 +5,18 @@ public sealed class SceneSnapshot
     public string Type { get; set; } = "scene_snapshot";
     public long Sequence { get; set; }
     public long UnixTimeMs { get; set; }
+    public RenderTargetInfo? RenderTarget { get; set; }
     public SceneInfo[] Scenes { get; set; } = Array.Empty<SceneInfo>();
+}
+
+public sealed class RenderTargetInfo
+{
+    public bool Available { get; set; }
+    public string SharedName { get; set; } = string.Empty;
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int DxgiFormat { get; set; }
+    public string Status { get; set; } = string.Empty;
 }
 
 public sealed class SceneInfo

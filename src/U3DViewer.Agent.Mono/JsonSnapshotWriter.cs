@@ -13,6 +13,9 @@ internal static class JsonSnapshotWriter
         Property(sb, "type", snapshot.Type); sb.Append(',');
         NumberProperty(sb, "sequence", snapshot.Sequence); sb.Append(',');
         NumberProperty(sb, "unixTimeMs", snapshot.UnixTimeMs); sb.Append(',');
+        sb.Append("\"renderTarget\":");
+        WriteRenderTarget(sb, snapshot.RenderTarget);
+        sb.Append(',');
         sb.Append("\"scenes\":[");
         for (var i = 0; i < snapshot.Scenes.Length; i++)
         {
@@ -21,6 +24,24 @@ internal static class JsonSnapshotWriter
         }
         sb.Append("]}");
         return sb.ToString();
+    }
+
+    private static void WriteRenderTarget(StringBuilder sb, RenderTargetInfo? target)
+    {
+        if (target is null)
+        {
+            sb.Append("null");
+            return;
+        }
+
+        sb.Append('{');
+        BoolProperty(sb, "available", target.Available); sb.Append(',');
+        Property(sb, "sharedName", target.SharedName); sb.Append(',');
+        NumberProperty(sb, "width", target.Width); sb.Append(',');
+        NumberProperty(sb, "height", target.Height); sb.Append(',');
+        NumberProperty(sb, "dxgiFormat", target.DxgiFormat); sb.Append(',');
+        Property(sb, "status", target.Status);
+        sb.Append('}');
     }
 
     private static void WriteScene(StringBuilder sb, SceneInfo scene)

@@ -3,6 +3,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -21,20 +22,46 @@ namespace
     constexpr int kCopySceneTextureEvent = 1;
 
     std::mutex g_mutex;
+
+    // Writer state: used inside the target Unity process.
     ComPtr<ID3D11Texture2D> g_sourceTexture;
     ComPtr<ID3D11Texture2D> g_sharedTexture;
     ComPtr<ID3D11Device> g_device;
     ComPtr<ID3D11DeviceContext> g_context;
     ComPtr<IDXGIKeyedMutex> g_sharedMutex;
     std::wstring g_sharedName;
+
+    // Reader state: used when this same DLL is loaded by U3DViewer.exe.
+    // It is a different process, therefore a different set of globals.
+    ComPtr<ID3D11Device> g_readerDevice;
+    ComPtr<ID3D11DeviceContext> g_readerContext;
+    ComPtr<ID3D11Texture2D> g_readerTexture;
+    ComPtr<ID3D11Texture2D> g_readerStaging;
+    ComPtr<IDXGIKeyedMutex> g_readerMutex;
+    UINT g_readerWidth = 0;
+    UINT g_readerHeight = 0;
+    DXGI_FORMAT g_readerFormat = DXGI_FORMAT_UNKNOWN;
+
     HRESULT g_lastError = S_OK;
 
-    void ResetSharedResourceLocked()
+    void ResetWriterResourceLocked()
     {
         g_sharedMutex.Reset();
         g_sharedTexture.Reset();
         g_context.Reset();
         g_device.Reset();
+    }
+
+    void ResetReaderResourceLocked()
+    {
+        g_readerMutex.Reset();
+        g_readerStaging.Reset();
+        g_readerTexture.Reset();
+        g_readerContext.Reset();
+        g_readerDevice.Reset();
+        g_readerWidth = 0;
+        g_readerHeight = 0;
+        g_readerFormat = DXGI_FORMAT_UNKNOWN;
     }
 
     HRESULT EnsureSharedResourceLocked()
@@ -82,7 +109,7 @@ namespace
         HRESULT hr = g_device->CreateTexture2D(&sharedDesc, nullptr, &g_sharedTexture);
         if (FAILED(hr))
         {
-            ResetSharedResourceLocked();
+            ResetWriterResourceLocked();
             return hr;
         }
 
@@ -90,7 +117,7 @@ namespace
         hr = g_sharedTexture.As(&dxgiResource);
         if (FAILED(hr))
         {
-            ResetSharedResourceLocked();
+            ResetWriterResourceLocked();
             return hr;
         }
 
@@ -102,7 +129,7 @@ namespace
             &sharedHandle);
         if (FAILED(hr))
         {
-            ResetSharedResourceLocked();
+            ResetWriterResourceLocked();
             return hr;
         }
 
@@ -114,7 +141,7 @@ namespace
         hr = g_sharedTexture.As(&g_sharedMutex);
         if (FAILED(hr))
         {
-            ResetSharedResourceLocked();
+            ResetWriterResourceLocked();
             return hr;
         }
 
@@ -183,7 +210,7 @@ U3DVIEWER_EXPORT int U3DViewer_SetSourceTexture(void* nativeTexture, const wchar
     std::lock_guard<std::mutex> lock(g_mutex);
     g_sourceTexture = source;
     g_sharedName = sharedName;
-    ResetSharedResourceLocked();
+    ResetWriterResourceLocked();
     g_lastError = S_OK;
     return 1;
 }
@@ -198,10 +225,190 @@ U3DVIEWER_EXPORT int U3DViewer_GetCopyEventId()
     return kCopySceneTextureEvent;
 }
 
-U3DVIEWER_EXPORT long U3DViewer_GetLastError()
+U3DVIEWER_EXPORT int U3DViewer_GetSourceDxgiFormat()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    return static_cast<long>(g_lastError);
+    if (!g_sourceTexture)
+    {
+        return static_cast<int>(DXGI_FORMAT_UNKNOWN);
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    g_sourceTexture->GetDesc(&desc);
+    return static_cast<int>(desc.Format);
+}
+
+U3DVIEWER_EXPORT int U3DViewer_OpenSharedTexture(const wchar_t* sharedName)
+{
+    if (sharedName == nullptr || sharedName[0] == L'\0')
+    {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ResetReaderResourceLocked();
+
+    D3D_FEATURE_LEVEL featureLevel{};
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        nullptr,
+        0,
+        D3D11_SDK_VERSION,
+        &g_readerDevice,
+        &featureLevel,
+        &g_readerContext);
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        ResetReaderResourceLocked();
+        return 0;
+    }
+
+    ComPtr<ID3D11Device1> device1;
+    hr = g_readerDevice.As(&device1);
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        ResetReaderResourceLocked();
+        return 0;
+    }
+
+    hr = device1->OpenSharedResourceByName(
+        sharedName,
+        DXGI_SHARED_RESOURCE_READ,
+        IID_PPV_ARGS(&g_readerTexture));
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        ResetReaderResourceLocked();
+        return 0;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    g_readerTexture->GetDesc(&desc);
+    g_readerWidth = desc.Width;
+    g_readerHeight = desc.Height;
+    g_readerFormat = desc.Format;
+
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+    stagingDesc.MipLevels = 1;
+    stagingDesc.ArraySize = 1;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.SampleDesc.Quality = 0;
+
+    hr = g_readerDevice->CreateTexture2D(&stagingDesc, nullptr, &g_readerStaging);
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        ResetReaderResourceLocked();
+        return 0;
+    }
+
+    hr = g_readerTexture.As(&g_readerMutex);
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        ResetReaderResourceLocked();
+        return 0;
+    }
+
+    g_lastError = S_OK;
+    return 1;
+}
+
+U3DVIEWER_EXPORT int U3DViewer_ReadSharedTexture(
+    void* destination,
+    int destinationStride,
+    int destinationHeight,
+    int* width,
+    int* height,
+    int* dxgiFormat)
+{
+    if (destination == nullptr || destinationStride <= 0 || destinationHeight <= 0)
+    {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_readerTexture || !g_readerStaging || !g_readerContext || !g_readerMutex)
+    {
+        g_lastError = E_POINTER;
+        return 0;
+    }
+
+    const UINT bytesPerPixel = 4;
+    const UINT rowBytes = g_readerWidth * bytesPerPixel;
+    if (destinationStride < static_cast<int>(rowBytes) || destinationHeight < static_cast<int>(g_readerHeight))
+    {
+        g_lastError = E_INVALIDARG;
+        return 0;
+    }
+
+    HRESULT hr = g_readerMutex->AcquireSync(1, 0);
+    if (hr == WAIT_TIMEOUT)
+    {
+        return 0;
+    }
+    if (FAILED(hr))
+    {
+        g_lastError = hr;
+        return 0;
+    }
+
+    bool releaseMutex = true;
+    g_readerContext->CopyResource(g_readerStaging.Get(), g_readerTexture.Get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = g_readerContext->Map(g_readerStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr))
+    {
+        g_readerMutex->ReleaseSync(0);
+        g_lastError = hr;
+        return 0;
+    }
+
+    auto* dst = static_cast<unsigned char*>(destination);
+    auto* src = static_cast<const unsigned char*>(mapped.pData);
+    for (UINT y = 0; y < g_readerHeight; ++y)
+    {
+        std::memcpy(
+            dst + static_cast<size_t>(y) * destinationStride,
+            src + static_cast<size_t>(y) * mapped.RowPitch,
+            rowBytes);
+    }
+
+    g_readerContext->Unmap(g_readerStaging.Get(), 0);
+    if (releaseMutex)
+    {
+        g_readerMutex->ReleaseSync(0);
+    }
+
+    if (width) *width = static_cast<int>(g_readerWidth);
+    if (height) *height = static_cast<int>(g_readerHeight);
+    if (dxgiFormat) *dxgiFormat = static_cast<int>(g_readerFormat);
+
+    g_lastError = S_OK;
+    return 1;
+}
+
+U3DVIEWER_EXPORT int U3DViewer_GetLastError()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<int>(g_lastError);
+}
+
+U3DVIEWER_EXPORT void U3DViewer_ResetReader()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ResetReaderResourceLocked();
+    g_lastError = S_OK;
 }
 
 U3DVIEWER_EXPORT void U3DViewer_Reset()
@@ -209,6 +416,6 @@ U3DVIEWER_EXPORT void U3DViewer_Reset()
     std::lock_guard<std::mutex> lock(g_mutex);
     g_sourceTexture.Reset();
     g_sharedName.clear();
-    ResetSharedResourceLocked();
+    ResetWriterResourceLocked();
     g_lastError = S_OK;
 }

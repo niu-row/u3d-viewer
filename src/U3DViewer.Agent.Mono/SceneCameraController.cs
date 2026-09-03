@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using U3DViewer.Protocol;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -6,9 +7,21 @@ namespace U3DViewer.Agent.Mono;
 
 internal sealed class SceneCameraController : IDisposable
 {
+    private const int RenderWidth = 1280;
+    private const int RenderHeight = 720;
+    private const float RenderInterval = 1f / 30f;
+
     private GameObject? _cameraObject;
     private Camera? _camera;
+    private RenderTexture? _renderTexture;
     private float _moveSpeed = 10f;
+    private float _nextRenderAt;
+    private bool _bridgeReady;
+    private IntPtr _renderEvent;
+    private int _copyEventId;
+    private int _dxgiFormat;
+    private string _sharedName = string.Empty;
+    private string _renderStatus = "Scene Camera has not initialized yet.";
 
     public void Apply(ViewerCommand command)
     {
@@ -57,6 +70,42 @@ internal sealed class SceneCameraController : IDisposable
         }
     }
 
+    public void TickRender()
+    {
+        EnsureCamera();
+        if (!_bridgeReady || _camera is null || Time.unscaledTime < _nextRenderAt)
+        {
+            return;
+        }
+
+        _nextRenderAt = Time.unscaledTime + RenderInterval;
+
+        try
+        {
+            _camera.Render();
+            GL.IssuePluginEvent(_renderEvent, _copyEventId);
+        }
+        catch (Exception ex)
+        {
+            _bridgeReady = false;
+            _renderStatus = $"Scene render failed: {ex.Message}";
+        }
+    }
+
+    public RenderTargetInfo GetRenderTargetInfo()
+    {
+        EnsureCamera();
+        return new RenderTargetInfo
+        {
+            Available = _bridgeReady,
+            SharedName = _sharedName,
+            Width = RenderWidth,
+            Height = RenderHeight,
+            DxgiFormat = _dxgiFormat,
+            Status = _renderStatus
+        };
+    }
+
     private void EnsureCamera()
     {
         if (_camera is not null)
@@ -71,7 +120,67 @@ internal sealed class SceneCameraController : IDisposable
         _camera.enabled = false;
         _camera.nearClipPlane = 0.03f;
         _camera.farClipPlane = 10000f;
+
+        _renderTexture = new RenderTexture(RenderWidth, RenderHeight, 24, RenderTextureFormat.ARGB32)
+        {
+            name = "__U3DViewerRenderTexture"
+        };
+        _renderTexture.Create();
+        _camera.targetTexture = _renderTexture;
+
         CopyFromGameCamera();
+        TryInitializeBridge();
+    }
+
+    private void TryInitializeBridge()
+    {
+        if (_renderTexture is null)
+        {
+            return;
+        }
+
+        if (!string.Equals(SystemInfo.graphicsDeviceType.ToString(), "Direct3D11", StringComparison.Ordinal))
+        {
+            _renderStatus = $"Unsupported graphics API: {SystemInfo.graphicsDeviceType}. M4 currently requires Direct3D11.";
+            return;
+        }
+
+        try
+        {
+            _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}";
+            var nativeTexture = _renderTexture.GetNativeTexturePtr();
+            if (nativeTexture == IntPtr.Zero)
+            {
+                _renderStatus = "RenderTexture returned a null native texture pointer.";
+                return;
+            }
+
+            if (NativeBridge.U3DViewer_SetSourceTexture(nativeTexture, _sharedName) == 0)
+            {
+                _renderStatus = $"NativeBridge rejected the RenderTexture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
+                return;
+            }
+
+            _renderEvent = NativeBridge.U3DViewer_GetRenderEventFunc();
+            _copyEventId = NativeBridge.U3DViewer_GetCopyEventId();
+            _dxgiFormat = NativeBridge.U3DViewer_GetSourceDxgiFormat();
+            _bridgeReady = _renderEvent != IntPtr.Zero;
+            _renderStatus = _bridgeReady
+                ? "D3D11 shared Scene render target is ready."
+                : "NativeBridge did not return a render event callback.";
+        }
+        catch (DllNotFoundException)
+        {
+            _renderStatus = "U3DViewer.NativeBridge.dll was not found. Copy the x64 DLL next to the target game executable.";
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            _renderStatus = $"NativeBridge API mismatch: {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            _renderStatus = $"NativeBridge initialization failed: {ex.Message}";
+        }
     }
 
     private void CopyFromGameCamera()
@@ -163,6 +272,27 @@ internal sealed class SceneCameraController : IDisposable
 
     public void Dispose()
     {
+        try
+        {
+            NativeBridge.U3DViewer_Reset();
+        }
+        catch
+        {
+            // Bridge is optional until M4 deployment is complete.
+        }
+
+        if (_camera is not null)
+        {
+            _camera.targetTexture = null;
+        }
+
+        if (_renderTexture is not null)
+        {
+            _renderTexture.Release();
+            UnityEngine.Object.Destroy(_renderTexture);
+            _renderTexture = null;
+        }
+
         if (_cameraObject is not null)
         {
             UnityEngine.Object.Destroy(_cameraObject);

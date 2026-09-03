@@ -46,6 +46,8 @@ public sealed class Plugin : BaseUnityPlugin
             }
         }
 
+        _sceneCamera?.TickRender();
+
         if (UnityEngine.Time.unscaledTime < _nextSnapshotAt)
         {
             return;
@@ -56,6 +58,7 @@ public sealed class Plugin : BaseUnityPlugin
         try
         {
             var snapshot = SceneScanner.Capture(++_sequence);
+            snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)
