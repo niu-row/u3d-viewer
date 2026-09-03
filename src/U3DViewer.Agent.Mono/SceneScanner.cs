@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using U3DViewer.Protocol;
 using UnityEngine;
@@ -205,7 +207,7 @@ internal static class SceneScanner
         public int Index { get; private set; }
     }
 
-    private static GameObjectInfo UnavailableObject() => new()
+    private static GameObjectInfo UnavailableObject() => new GameObjectInfo
     {
         Name = "<unavailable>",
         ActiveSelf = false,
@@ -225,7 +227,7 @@ internal static class SceneScanner
         }
     }
 
-    private static Vector3Info ToInfo(Vector3 value) => new()
+    private static Vector3Info ToInfo(Vector3 value) => new Vector3Info
     {
         X = value.x,
         Y = value.y,
