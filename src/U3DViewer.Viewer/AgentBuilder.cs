@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace U3DViewer.Viewer;
 
@@ -19,7 +21,7 @@ internal static class AgentBuilder
 
     public static bool CanBuild(out string reason)
     {
-        var sourceRoot = Path.Combine(AppContext.BaseDirectory, "agent-builder");
+        var sourceRoot = GetSourceRoot();
         if (!Directory.Exists(sourceRoot))
         {
             reason = "Viewer Agent Builder payload is missing. Rebuild U3DViewer.Viewer.";
@@ -36,6 +38,47 @@ internal static class AgentBuilder
         return true;
     }
 
+    public static bool CanBuild(string executablePath, string backend, out string reason)
+    {
+        reason = string.Empty;
+        if (backend is not ("Mono" or "IL2CPP"))
+        {
+            reason = $"Unsupported Unity backend: {backend}.";
+            return false;
+        }
+
+        var sourceRoot = GetSourceRoot();
+        if (!Directory.Exists(sourceRoot))
+        {
+            reason = "Viewer Agent Builder payload is missing. Rebuild U3DViewer.Viewer.";
+            return false;
+        }
+
+        if (HasRequiredReferences(executablePath, backend, out var referenceDirectory))
+        {
+            try
+            {
+                var fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, referenceDirectory);
+                if (TryGetCachedAgent(backend, fingerprint, out _, out _))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // If cache probing fails, fall through to checking whether a fresh build is possible.
+            }
+        }
+
+        if (ResolveDotNet() is null)
+        {
+            reason = ".NET SDK was not found and no compatible cached Agent is available. Install the .NET 8 SDK, then reopen U3DViewer.";
+            return false;
+        }
+
+        return true;
+    }
+
     public static bool HasRequiredReferences(string executablePath, string backend, out string referenceDirectory)
     {
         referenceDirectory = GetReferenceDirectory(executablePath, backend);
@@ -48,14 +91,15 @@ internal static class AgentBuilder
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        if (!CanBuild(out var reason))
-        {
-            return new AgentBuildResult(false, reason);
-        }
-
         if (backend is not ("Mono" or "IL2CPP"))
         {
             return new AgentBuildResult(false, $"Unsupported Unity backend: {backend}.");
+        }
+
+        var sourceRoot = GetSourceRoot();
+        if (!Directory.Exists(sourceRoot))
+        {
+            return new AgentBuildResult(false, "Viewer Agent Builder payload is missing. Rebuild U3DViewer.Viewer.");
         }
 
         if (!HasRequiredReferences(executablePath, backend, out var referenceDirectory))
@@ -67,13 +111,41 @@ internal static class AgentBuilder
                     : $"Unity managed reference assemblies are missing from {referenceDirectory}.");
         }
 
-        var dotnet = ResolveDotNet()!;
-        var sourceRoot = Path.Combine(AppContext.BaseDirectory, "agent-builder");
+        string fingerprint;
+        try
+        {
+            progress?.Report($"Checking {backend} Agent compatibility cache...");
+            fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, referenceDirectory);
+        }
+        catch (Exception ex)
+        {
+            return new AgentBuildResult(false, $"Could not fingerprint the selected game's Unity runtime: {ex.Message}");
+        }
+
+        if (TryGetCachedAgent(backend, fingerprint, out var cachedAgent, out var cachedProtocol))
+        {
+            progress?.Report($"Using cached {backend} Agent ({ShortFingerprint(fingerprint)}). No rebuild needed.");
+            return new AgentBuildResult(
+                true,
+                $"Compatible {backend} Agent cache hit.",
+                cachedAgent,
+                cachedProtocol);
+        }
+
+        var dotnet = ResolveDotNet();
+        if (dotnet is null)
+        {
+            return new AgentBuildResult(
+                false,
+                ".NET SDK was not found and this Unity compatibility profile has not been built before. Install the .NET 8 SDK for the first build.");
+        }
+
         var workspace = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "U3DViewer",
             "AgentBuilder",
-            backend);
+            "Work",
+            $"{backend}-{Environment.ProcessId}");
 
         try
         {
@@ -89,13 +161,11 @@ internal static class AgentBuilder
             return new AgentBuildResult(false, $"Could not prepare Agent Builder workspace: {ex.Message}");
         }
 
-        var projectFolder = backend == "Mono"
-            ? "U3DViewer.Agent.Mono"
-            : "U3DViewer.Agent.IL2CPP";
+        var projectFolder = GetProjectFolder(backend);
         var targetFramework = backend == "Mono" ? "netstandard2.0" : "net6.0";
         var projectPath = Path.Combine(workspace, "src", projectFolder, projectFolder + ".csproj");
 
-        progress?.Report($"Building {backend} Agent against the selected game's Unity assemblies...");
+        progress?.Report($"Building {backend} Agent for compatibility profile {ShortFingerprint(fingerprint)} (first use only)...");
 
         var startInfo = new ProcessStartInfo
         {
@@ -151,8 +221,142 @@ internal static class AgentBuilder
             return new AgentBuildResult(false, "Agent build completed but expected output DLLs were not found.");
         }
 
-        return new AgentBuildResult(true, $"{backend} Agent built successfully.", agentPath, protocolPath);
+        try
+        {
+            var cacheDirectory = GetCacheDirectory(backend, fingerprint);
+            Directory.CreateDirectory(cacheDirectory);
+
+            var cacheAgent = Path.Combine(cacheDirectory, Path.GetFileName(agentPath));
+            var cacheProtocol = Path.Combine(cacheDirectory, "U3DViewer.Protocol.dll");
+            File.Copy(agentPath, cacheAgent, overwrite: true);
+            File.Copy(protocolPath, cacheProtocol, overwrite: true);
+            File.WriteAllText(
+                Path.Combine(cacheDirectory, "compatibility.txt"),
+                $"backend={backend}{Environment.NewLine}fingerprint={fingerprint}{Environment.NewLine}builtUtc={DateTime.UtcNow:O}{Environment.NewLine}");
+
+            progress?.Report($"Cached {backend} Agent profile {ShortFingerprint(fingerprint)} for future launches.");
+            return new AgentBuildResult(
+                true,
+                $"{backend} Agent built and cached successfully.",
+                cacheAgent,
+                cacheProtocol);
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"{backend} Agent built successfully, but cache write failed: {ex.Message}");
+            return new AgentBuildResult(
+                true,
+                $"{backend} Agent built successfully; cache could not be written.",
+                agentPath,
+                protocolPath);
+        }
     }
+
+    private static string ComputeCompatibilityFingerprint(
+        string sourceRoot,
+        string backend,
+        string referenceDirectory)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendText(hash, "U3DViewer-Agent-Compatibility-v1");
+        AppendText(hash, backend);
+
+        var projectFolder = GetProjectFolder(backend);
+        var builderInputs = new List<string>();
+        AddFiles(builderInputs, Path.Combine(sourceRoot, "src", projectFolder));
+        AddFiles(builderInputs, Path.Combine(sourceRoot, "src", "U3DViewer.Protocol"));
+
+        foreach (var rootFile in new[] { "Directory.Build.props", "NuGet.Config" })
+        {
+            var path = Path.Combine(sourceRoot, rootFile);
+            if (File.Exists(path))
+            {
+                builderInputs.Add(path);
+            }
+        }
+
+        foreach (var file in builderInputs
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(path => Path.GetRelativePath(sourceRoot, path), StringComparer.OrdinalIgnoreCase))
+        {
+            AppendText(hash, "builder:" + Path.GetRelativePath(sourceRoot, file).Replace('\\', '/'));
+            AppendFileHash(hash, file);
+        }
+
+        foreach (var assemblyName in RequiredUnityAssemblies)
+        {
+            var path = Path.Combine(referenceDirectory, assemblyName);
+            AppendText(hash, "runtime:" + assemblyName);
+            AppendFileHash(hash, path);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static void AddFiles(List<string> files, string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        files.AddRange(Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(path => !IsBuildOutputPath(path)));
+    }
+
+    private static bool IsBuildOutputPath(string path)
+    {
+        var segments = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return segments.Any(segment =>
+            string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(segment, "lib", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void AppendText(IncrementalHash hash, string value)
+    {
+        hash.AppendData(Encoding.UTF8.GetBytes(value));
+        hash.AppendData(new byte[] { 0 });
+    }
+
+    private static void AppendFileHash(IncrementalHash hash, string path)
+    {
+        using var file = File.OpenRead(path);
+        var digest = SHA256.HashData(file);
+        hash.AppendData(digest);
+    }
+
+    private static bool TryGetCachedAgent(
+        string backend,
+        string fingerprint,
+        out string agentPath,
+        out string protocolPath)
+    {
+        var cacheDirectory = GetCacheDirectory(backend, fingerprint);
+        var projectFolder = GetProjectFolder(backend);
+        agentPath = Path.Combine(cacheDirectory, projectFolder + ".dll");
+        protocolPath = Path.Combine(cacheDirectory, "U3DViewer.Protocol.dll");
+
+        return File.Exists(agentPath) && new FileInfo(agentPath).Length > 0 &&
+               File.Exists(protocolPath) && new FileInfo(protocolPath).Length > 0;
+    }
+
+    private static string GetCacheDirectory(string backend, string fingerprint) =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "U3DViewer",
+            "AgentCache",
+            backend,
+            fingerprint);
+
+    private static string GetSourceRoot() =>
+        Path.Combine(AppContext.BaseDirectory, "agent-builder");
+
+    private static string GetProjectFolder(string backend) =>
+        backend == "Mono" ? "U3DViewer.Agent.Mono" : "U3DViewer.Agent.IL2CPP";
+
+    private static string ShortFingerprint(string fingerprint) =>
+        fingerprint.Length <= 12 ? fingerprint : fingerprint[..12];
 
     private static string GetReferenceDirectory(string executablePath, string backend)
     {
