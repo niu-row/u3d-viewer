@@ -117,19 +117,7 @@ internal sealed class PipeServer : IDisposable
             {
                 try
                 {
-                    if (pipe.IsConnected)
-                    {
-                        try
-                        {
-                            pipe.Disconnect();
-                        }
-                        catch (IOException)
-                        {
-                        }
-                        catch (InvalidOperationException)
-                        {
-                        }
-                    }
+                    TryDisconnectLegacy(pipe);
 
                     _log.LogInfo($"Waiting for viewer on pipe '{_pipeName}'...");
                     pipe.WaitForConnection();
@@ -199,7 +187,20 @@ internal sealed class PipeServer : IDisposable
         {
             try
             {
-                ReadCommands(pipe);
+                ReadCommandsLegacy(pipe);
+            }
+            catch (IOException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (Exception ex)
+            {
+                if (!_stopping)
+                {
+                    _log.LogWarning($"Legacy pipe reader stopped: {ex.Message}");
+                }
             }
             finally
             {
@@ -220,7 +221,10 @@ internal sealed class PipeServer : IDisposable
                 AutoFlush = true
             };
 
-            while (!_stopping && pipe.IsConnected && Interlocked.CompareExchange(ref readerFinished, 0, 0) == 0)
+            // Mono's legacy NamedPipeServerStream.IsConnected is not reliable enough to
+            // use as session liveness. Keep the session alive until the reader observes
+            // EOF/an exception, or a write fails, or the server is stopping.
+            while (!_stopping && Interlocked.CompareExchange(ref readerFinished, 0, 0) == 0)
             {
                 if (TryDequeueOutbound(out var payload))
                 {
@@ -234,20 +238,40 @@ internal sealed class PipeServer : IDisposable
         }
         finally
         {
-            if (pipe.IsConnected)
-            {
-                try
-                {
-                    pipe.Disconnect();
-                }
-                catch (IOException)
-                {
-                }
-                catch (InvalidOperationException)
-                {
-                }
-            }
+            TryDisconnectLegacy(pipe);
             readerThread.Join(500);
+        }
+    }
+
+    private void ReadCommandsLegacy(NamedPipeServerStream pipe)
+    {
+        var reader = new StreamReader(pipe, Encoding.UTF8);
+        while (!_stopping)
+        {
+            var line = reader.ReadLine();
+            if (line is null)
+            {
+                break;
+            }
+
+            EnqueueCommand(line);
+        }
+    }
+
+    private static void TryDisconnectLegacy(NamedPipeServerStream pipe)
+    {
+        try
+        {
+            pipe.Disconnect();
+        }
+        catch (IOException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 #else
@@ -347,17 +371,22 @@ internal sealed class PipeServer : IDisposable
                 break;
             }
 
-            if (ViewerCommandCodec.TryParse(line, out var command))
+            EnqueueCommand(line);
+        }
+    }
+
+    private void EnqueueCommand(string line)
+    {
+        if (ViewerCommandCodec.TryParse(line, out var command))
+        {
+            lock (_inboundLock)
             {
-                lock (_inboundLock)
-                {
-                    _inbound.Enqueue(command);
-                }
+                _inbound.Enqueue(command);
             }
-            else
-            {
-                _log.LogDebug($"Ignored unknown viewer command: {line}");
-            }
+        }
+        else
+        {
+            _log.LogDebug($"Ignored unknown viewer command: {line}");
         }
     }
 
