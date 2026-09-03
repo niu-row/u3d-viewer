@@ -6,8 +6,8 @@ internal sealed record GameAutomationResult(bool Success, string Message, UnityP
 
 internal static class GameAutomation
 {
-    private static readonly TimeSpan AgentStartupTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan GracefulCloseTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan AgentStartupTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan GracefulCloseTimeout = TimeSpan.FromSeconds(10);
 
     public static bool CanInstall(UnityProcessInfo target, out string reason) =>
         CanInstall(target.ExecutablePath, target.Backend, out reason);
@@ -21,31 +21,21 @@ internal static class GameAutomation
             return false;
         }
 
-        var gameDirectory = Path.GetDirectoryName(executablePath);
-        if (string.IsNullOrWhiteSpace(gameDirectory))
+        if (!File.Exists(executablePath))
         {
-            reason = "Game directory could not be resolved.";
+            reason = "Game executable no longer exists.";
             return false;
         }
 
-        if (!Directory.Exists(Path.Combine(gameDirectory, "BepInEx")))
+        if (!AgentBuilder.CanBuild(out reason))
         {
-            reason = "BepInEx is not installed in this game. Install the matching BepInEx 6 runtime first.";
             return false;
         }
 
-        var agentPath = GetAgentPayloadPath(backend);
-        if (!File.Exists(agentPath))
-        {
-            reason = $"Viewer does not contain the {backend} Agent payload. Build that backend before using GUI install.";
-            return false;
-        }
-
-        var protocolPath = Path.Combine(AppContext.BaseDirectory, "U3DViewer.Protocol.dll");
         var nativePath = Path.Combine(AppContext.BaseDirectory, "U3DViewer.NativeBridge.dll");
-        if (!File.Exists(protocolPath) || !File.Exists(nativePath))
+        if (!File.Exists(nativePath))
         {
-            reason = "Viewer payload is incomplete: Protocol or NativeBridge is missing.";
+            reason = "U3DViewer.NativeBridge.dll is missing next to the Viewer executable.";
             return false;
         }
 
@@ -54,53 +44,22 @@ internal static class GameAutomation
 
     public static async Task<GameAutomationResult> InstallAndRestartAsync(
         UnityProcessInfo target,
+        IProgress<string>? progress,
         CancellationToken cancellationToken = default)
     {
-        var deploy = Deploy(target.ExecutablePath, target.Backend);
-        if (!deploy.Success)
+        progress?.Report($"Closing {target.ProcessName} so U3DViewer can prepare the runtime...");
+        var close = await CloseExistingProcessAsync(target.ProcessId, cancellationToken);
+        if (!close.Success)
         {
-            return deploy;
+            return close;
         }
 
-        Process? process = null;
-        try
-        {
-            process = Process.GetProcessById(target.ProcessId);
-            if (!process.HasExited)
-            {
-                if (!process.CloseMainWindow())
-                {
-                    return new GameAutomationResult(
-                        false,
-                        "Agent files were installed, but the game did not accept a graceful close request. Close it manually, then use Open Game… to launch it with the Agent.");
-                }
-
-                var exitTask = process.WaitForExitAsync(cancellationToken);
-                var completed = await Task.WhenAny(exitTask, Task.Delay(GracefulCloseTimeout, cancellationToken));
-                if (completed != exitTask)
-                {
-                    return new GameAutomationResult(
-                        false,
-                        "Agent files were installed, but the game did not exit within 8 seconds. It was not force-killed; close it manually, then launch it again.");
-                }
-
-                await exitTask;
-            }
-        }
-        catch (ArgumentException)
-        {
-            // Process already exited between scan and restart. Continue with relaunch.
-        }
-        finally
-        {
-            process?.Dispose();
-        }
-
-        return await StartAndWaitAsync(target.ExecutablePath, cancellationToken);
+        return await PrepareLaunchAndWaitAsync(target.ExecutablePath, target.Backend, progress, cancellationToken);
     }
 
     public static async Task<GameAutomationResult> InstallLaunchAndWaitAsync(
         string executablePath,
+        IProgress<string>? progress,
         CancellationToken cancellationToken = default)
     {
         if (!UnityProcessDiscovery.TryInspectExecutable(executablePath, out var backend))
@@ -108,35 +67,80 @@ internal static class GameAutomation
             return new GameAutomationResult(false, "The selected executable does not look like a Unity standalone game.");
         }
 
-        var deploy = Deploy(executablePath, backend);
-        if (!deploy.Success)
-        {
-            return deploy;
-        }
-
-        return await StartAndWaitAsync(executablePath, cancellationToken);
+        return await PrepareLaunchAndWaitAsync(executablePath, backend, progress, cancellationToken);
     }
 
-    private static GameAutomationResult Deploy(string executablePath, string backend)
+    private static async Task<GameAutomationResult> PrepareLaunchAndWaitAsync(
+        string executablePath,
+        string backend,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
     {
         if (!CanInstall(executablePath, backend, out var reason))
         {
             return new GameAutomationResult(false, reason);
         }
 
+        progress?.Report($"Preparing Unity {backend} runtime...");
+        var bepinex = await BepInExBootstrap.EnsureInstalledAsync(executablePath, backend, progress, cancellationToken);
+        if (!bepinex.Success)
+        {
+            return new GameAutomationResult(false, bepinex.Message);
+        }
+
+        if (backend == "IL2CPP")
+        {
+            var interop = await BepInExBootstrap.EnsureIl2CppInteropAsync(executablePath, progress, cancellationToken);
+            if (!interop.Success)
+            {
+                return new GameAutomationResult(false, interop.Message);
+            }
+        }
+
+        var build = await AgentBuilder.BuildAsync(executablePath, backend, progress, cancellationToken);
+        if (!build.Success || string.IsNullOrWhiteSpace(build.AgentPath) || string.IsNullOrWhiteSpace(build.ProtocolPath))
+        {
+            return new GameAutomationResult(false, build.Message);
+        }
+
+        progress?.Report("Deploying U3DViewer Agent into the selected game...");
+        var deploy = Deploy(executablePath, backend, build.AgentPath, build.ProtocolPath);
+        if (!deploy.Success)
+        {
+            return deploy;
+        }
+
+        progress?.Report("Launching game and waiting for U3DViewer Agent...");
+        return await StartAndWaitAsync(executablePath, cancellationToken);
+    }
+
+    private static GameAutomationResult Deploy(
+        string executablePath,
+        string backend,
+        string agentPath,
+        string protocolPath)
+    {
         try
         {
             var gameDirectory = Path.GetDirectoryName(executablePath)!;
             var pluginDirectory = Path.Combine(gameDirectory, "BepInEx", "plugins", "U3DViewer");
             Directory.CreateDirectory(pluginDirectory);
 
-            var agentPath = GetAgentPayloadPath(backend);
-            var protocolPath = Path.Combine(AppContext.BaseDirectory, "U3DViewer.Protocol.dll");
-            var nativePath = Path.Combine(AppContext.BaseDirectory, "U3DViewer.NativeBridge.dll");
+            foreach (var staleAgent in new[] { "U3DViewer.Agent.Mono.dll", "U3DViewer.Agent.IL2CPP.dll" })
+            {
+                var stalePath = Path.Combine(pluginDirectory, staleAgent);
+                if (File.Exists(stalePath))
+                {
+                    File.Delete(stalePath);
+                }
+            }
 
             File.Copy(agentPath, Path.Combine(pluginDirectory, Path.GetFileName(agentPath)), overwrite: true);
             File.Copy(protocolPath, Path.Combine(pluginDirectory, "U3DViewer.Protocol.dll"), overwrite: true);
-            File.Copy(nativePath, Path.Combine(gameDirectory, "U3DViewer.NativeBridge.dll"), overwrite: true);
+            File.Copy(
+                Path.Combine(AppContext.BaseDirectory, "U3DViewer.NativeBridge.dll"),
+                Path.Combine(gameDirectory, "U3DViewer.NativeBridge.dll"),
+                overwrite: true);
 
             return new GameAutomationResult(true, $"Installed {backend} Agent into {pluginDirectory}.");
         }
@@ -151,6 +155,48 @@ internal static class GameAutomation
         catch (Exception ex)
         {
             return new GameAutomationResult(false, $"Deployment failed: {ex.Message}");
+        }
+    }
+
+    private static async Task<GameAutomationResult> CloseExistingProcessAsync(
+        int processId,
+        CancellationToken cancellationToken)
+    {
+        Process? process = null;
+        try
+        {
+            process = Process.GetProcessById(processId);
+            if (process.HasExited)
+            {
+                return new GameAutomationResult(true, "Process already exited.");
+            }
+
+            if (!process.CloseMainWindow())
+            {
+                return new GameAutomationResult(
+                    false,
+                    "The running game did not accept a normal close request. Close it manually, then use Open Game…; U3DViewer will not force-kill a game you were already running.");
+            }
+
+            var waitTask = process.WaitForExitAsync(cancellationToken);
+            var completed = await Task.WhenAny(waitTask, Task.Delay(GracefulCloseTimeout, cancellationToken));
+            if (completed != waitTask)
+            {
+                return new GameAutomationResult(
+                    false,
+                    "The running game did not exit within 10 seconds. Close it manually, then use Open Game…; U3DViewer will not force-kill an existing session.");
+            }
+
+            await waitTask;
+            return new GameAutomationResult(true, "Game closed.");
+        }
+        catch (ArgumentException)
+        {
+            return new GameAutomationResult(true, "Process already exited.");
+        }
+        finally
+        {
+            process?.Dispose();
         }
     }
 
@@ -187,17 +233,18 @@ internal static class GameAutomation
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (process.HasExited)
-                {
-                    return new GameAutomationResult(false, $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}).");
-                }
-
-                var target = UnityProcessDiscovery.Scan()
-                    .FirstOrDefault(item => item.ProcessId == process.Id);
+                var target = UnityProcessDiscovery.Scan().FirstOrDefault(item =>
+                    item.ProcessId == process.Id ||
+                    string.Equals(item.ExecutablePath, executablePath, StringComparison.OrdinalIgnoreCase));
 
                 if (target?.AgentStatus == AgentProcessStatus.Ready)
                 {
                     return new GameAutomationResult(true, "Agent is ready.", target);
+                }
+
+                if (process.HasExited && target is null)
+                {
+                    return new GameAutomationResult(false, $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}). Check BepInEx/LogOutput.log.");
                 }
 
                 await Task.Delay(500, cancellationToken);
@@ -205,16 +252,7 @@ internal static class GameAutomation
 
             return new GameAutomationResult(
                 false,
-                "Game started, but the Agent did not become ready within 30 seconds. Check BepInEx/LogOutput.log for plugin load errors.");
+                "Game started, but the Agent did not become ready within 60 seconds. Check BepInEx/LogOutput.log for plugin load errors.");
         }
-    }
-
-    private static string GetAgentPayloadPath(string backend)
-    {
-        var fileName = backend == "Mono"
-            ? "U3DViewer.Agent.Mono.dll"
-            : "U3DViewer.Agent.IL2CPP.dll";
-
-        return Path.Combine(AppContext.BaseDirectory, "payload", backend, fileName);
     }
 }

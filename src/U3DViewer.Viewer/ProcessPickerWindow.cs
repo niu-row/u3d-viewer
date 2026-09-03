@@ -44,7 +44,7 @@ internal sealed class ProcessPickerWindow : Window
         {
             Content = "Select a process",
             IsEnabled = false,
-            MinWidth = 130
+            MinWidth = 140
         };
         _actionButton.Click += async (_, _) => await RunSelectedActionAsync();
 
@@ -101,7 +101,7 @@ internal sealed class ProcessPickerWindow : Window
 
         var description = new TextBlock
         {
-            Text = "Ready Agents attach immediately. For a detected game without an Agent, U3DViewer can install the bundled Agent and restart the game. Open Game… can deploy and launch a Unity executable directly.",
+            Text = "Choose a running Unity process or Open Game…. U3DViewer prepares BepInEx, builds the matching Agent from that game's Unity assemblies, deploys it, launches/restarts the game, and connects automatically.",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
         };
@@ -273,13 +273,13 @@ internal sealed class ProcessPickerWindow : Window
             default:
                 if (GameAutomation.CanInstall(selected, out var reason))
                 {
-                    _actionButton.Content = "Install + Restart";
+                    _actionButton.Content = "Prepare + Restart";
                     _actionButton.IsEnabled = true;
-                    _summary.Text = $"Agent not loaded. {selected.Backend} payload is available; install and restart can be automated.";
+                    _summary.Text = $"{selected.Backend} detected. U3DViewer can prepare the runtime and restart this game automatically.";
                 }
                 else
                 {
-                    _actionButton.Content = "Install unavailable";
+                    _actionButton.Content = "Prepare unavailable";
                     _actionButton.IsEnabled = false;
                     _summary.Text = reason;
                 }
@@ -307,8 +307,7 @@ internal sealed class ProcessPickerWindow : Window
         }
 
         await RunAutomationAsync(
-            "Installing Agent and restarting game...",
-            token => GameAutomation.InstallAndRestartAsync(selected, token));
+            (token, progress) => GameAutomation.InstallAndRestartAsync(selected, progress, token));
     }
 
     private async Task OpenGameAsync()
@@ -338,13 +337,11 @@ internal sealed class ProcessPickerWindow : Window
         }
 
         await RunAutomationAsync(
-            $"Deploying Agent and launching {Path.GetFileName(executablePath)}...",
-            token => GameAutomation.InstallLaunchAndWaitAsync(executablePath, token));
+            (token, progress) => GameAutomation.InstallLaunchAndWaitAsync(executablePath, progress, token));
     }
 
     private async Task RunAutomationAsync(
-        string status,
-        Func<CancellationToken, Task<GameAutomationResult>> action)
+        Func<CancellationToken, IProgress<string>, Task<GameAutomationResult>> action)
     {
         _operating = true;
         _refreshTimer.Stop();
@@ -352,12 +349,13 @@ internal sealed class ProcessPickerWindow : Window
         _openGameButton.IsEnabled = false;
         _refreshButton.IsEnabled = false;
         _list.IsEnabled = false;
-        _summary.Text = status;
+
+        var progress = new Progress<string>(message => _summary.Text = message);
 
         try
         {
-            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-            var result = await action(cancellation.Token);
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var result = await action(cancellation.Token, progress);
             if (result.Success && result.Target is not null)
             {
                 _summary.Text = "Agent ready. Opening Viewer...";
@@ -369,7 +367,7 @@ internal sealed class ProcessPickerWindow : Window
         }
         catch (OperationCanceledException)
         {
-            _summary.Text = "Operation timed out.";
+            _summary.Text = "Operation timed out or was cancelled.";
         }
         catch (Exception ex)
         {

@@ -14,24 +14,37 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\U3DViewer.Agent.Mono\bin\$(Configuration)\netstandard2.0\U3DViewer.Agent.Mono.dll"
-          Link="payload\Mono\U3DViewer.Agent.Mono.dll"
-          CopyToOutputDirectory="PreserveNewest"
-          Condition="Exists('..\U3DViewer.Agent.Mono\bin\$(Configuration)\netstandard2.0\U3DViewer.Agent.Mono.dll')" />
-    <None Include="..\U3DViewer.Agent.IL2CPP\bin\$(Configuration)\net6.0\U3DViewer.Agent.IL2CPP.dll"
-          Link="payload\IL2CPP\U3DViewer.Agent.IL2CPP.dll"
-          CopyToOutputDirectory="PreserveNewest"
-          Condition="Exists('..\U3DViewer.Agent.IL2CPP\bin\$(Configuration)\net6.0\U3DViewer.Agent.IL2CPP.dll')" />
+    <AgentBuilderMonoSource Include="..\U3DViewer.Agent.Mono\**\*.cs;..\U3DViewer.Agent.Mono\U3DViewer.Agent.Mono.csproj"
+                            Exclude="..\U3DViewer.Agent.Mono\bin\**;..\U3DViewer.Agent.Mono\obj\**;..\U3DViewer.Agent.Mono\lib\**" />
+    <AgentBuilderIl2CppSource Include="..\U3DViewer.Agent.IL2CPP\**\*.cs;..\U3DViewer.Agent.IL2CPP\U3DViewer.Agent.IL2CPP.csproj"
+                             Exclude="..\U3DViewer.Agent.IL2CPP\bin\**;..\U3DViewer.Agent.IL2CPP\obj\**;..\U3DViewer.Agent.IL2CPP\lib\**" />
+    <AgentBuilderProtocolSource Include="..\U3DViewer.Protocol\**\*.cs;..\U3DViewer.Protocol\U3DViewer.Protocol.csproj"
+                                Exclude="..\U3DViewer.Protocol\bin\**;..\U3DViewer.Protocol\obj\**" />
   </ItemGroup>
 
   <Target Name="CopyLocalNativeBridge" AfterTargets="Build">
     <PropertyGroup>
       <NativeBridgePath>$(MSBuildProjectDirectory)\..\..\build\native\$(Configuration)\U3DViewer.NativeBridge.dll</NativeBridgePath>
     </PropertyGroup>
-    <Copy
-      SourceFiles="$(NativeBridgePath)"
-      DestinationFolder="$(OutputPath)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(NativeBridgePath)')" />
+    <Copy SourceFiles="$(NativeBridgePath)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(NativeBridgePath)')" />
+  </Target>
+
+  <Target Name="CopyAgentBuilderSources" AfterTargets="Build">
+    <MakeDir Directories="$(OutputPath)agent-builder\src\U3DViewer.Agent.Mono;$(OutputPath)agent-builder\src\U3DViewer.Agent.IL2CPP;$(OutputPath)agent-builder\src\U3DViewer.Protocol" />
+    <Copy SourceFiles="@(AgentBuilderMonoSource)"
+          DestinationFiles="@(AgentBuilderMonoSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.Mono\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(AgentBuilderIl2CppSource)"
+          DestinationFiles="@(AgentBuilderIl2CppSource->'$(OutputPath)agent-builder\src\U3DViewer.Agent.IL2CPP\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(AgentBuilderProtocolSource)"
+          DestinationFiles="@(AgentBuilderProtocolSource->'$(OutputPath)agent-builder\src\U3DViewer.Protocol\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\..\Directory.Build.props;$(MSBuildProjectDirectory)\..\..\NuGet.Config"
+          DestinationFolder="$(OutputPath)agent-builder"
+          SkipUnchangedFiles="true" />
   </Target>
 </Project>

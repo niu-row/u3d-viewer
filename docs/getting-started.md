@@ -1,207 +1,127 @@
 # Getting started
 
-The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, a startup Unity process picker, GUI install/launch automation, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
+The development workflow is now GUI-first. You do not configure a target game before building U3DViewer.
 
 ## Requirements
 
 - Windows x64
-- .NET 8 SDK for the standalone Viewer
-- .NET 6 SDK for the IL2CPP agent
-- Visual Studio C++ workload + CMake for `U3DViewer.NativeBridge.dll`
-- A Unity game you are authorized to inspect/debug
-- The matching BepInEx 6 runtime for that game
-- The target game must run Direct3D 11 for the current Scene View transport
+- .NET 8 SDK
+- Visual Studio 2022 C++ workload with CMake + Windows SDK
+- a Unity game you are authorized to inspect/debug
 
-BepInEx must already be installed in a target game before the Viewer can use `Install + Restart` or `Open Game...`. U3DViewer does not currently install BepInEx automatically because the correct runtime distribution depends on the target backend/game.
+The current Scene View transport requires Direct3D 11.
 
-## 1. Build the native D3D11 bridge
+## 1. Build once
 
-From a Visual Studio x64 developer shell:
+In VSCode, press:
+
+```text
+Ctrl+Shift+B
+```
+
+or run:
 
 ```powershell
-cmake -S native/U3DViewer.NativeBridge -B build/native -A x64
-cmake --build build/native --config Release
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
-The output is:
+This builds NativeBridge and Viewer. It also copies the Mono/IL2CPP Agent source projects plus Protocol project into the Viewer output as the runtime Agent Builder payload.
 
-```text
-build/native/Release/U3DViewer.NativeBridge.dll
-```
+No `gamePath`, backend selection, Unity DLL copying, or BepInEx setup is required at this stage.
 
-The Viewer build copies this DLL next to `U3DViewer.Viewer.exe` when it exists under `build/native/<Configuration>`.
-
-## 2. Mono setup
-
-For a Unity Mono game, copy these files from `<GameName>_Data/Managed` into:
-
-`src/U3DViewer.Agent.Mono/lib/`
-
-Required:
-
-- `UnityEngine.CoreModule.dll`
-- `UnityEngine.SceneManagementModule.dll`
-
-For older Unity versions that do not use split modules, the project file may need a legacy `UnityEngine.dll` reference instead.
-
-Build:
-
-```powershell
-dotnet restore src/U3DViewer.Agent.Mono/U3DViewer.Agent.Mono.csproj
-dotnet build src/U3DViewer.Agent.Mono/U3DViewer.Agent.Mono.csproj -c Release
-```
-
-When the Viewer is built after this Agent, the Agent DLL is bundled into:
-
-```text
-U3DViewer.Viewer/bin/Release/net8.0/payload/Mono/U3DViewer.Agent.Mono.dll
-```
-
-The runtime log should contain a PID-specific pipe, for example:
-
-```text
-U3D Viewer Mono agent loaded. Pipe: u3d-viewer-12345
-Waiting for viewer on pipe 'u3d-viewer-12345'...
-```
-
-## 3. IL2CPP setup
-
-Install the matching BepInEx 6 IL2CPP distribution into the game, then launch the game once so BepInEx can generate its interop assemblies.
-
-Copy the generated Unity proxy assemblies from `BepInEx/interop` into:
-
-`src/U3DViewer.Agent.IL2CPP/lib/`
-
-Required:
-
-- `UnityEngine.CoreModule.dll`
-- `UnityEngine.SceneManagementModule.dll`
-
-Do not commit the copied game assemblies. The repository `lib/` ignore rule keeps them local.
-
-Build:
-
-```powershell
-dotnet restore src/U3DViewer.Agent.IL2CPP/U3DViewer.Agent.IL2CPP.csproj
-dotnet build src/U3DViewer.Agent.IL2CPP/U3DViewer.Agent.IL2CPP.csproj -c Release
-```
-
-When the Viewer is built after this Agent, the Agent DLL is bundled into:
-
-```text
-U3DViewer.Viewer/bin/Release/net8.0/payload/IL2CPP/U3DViewer.Agent.IL2CPP.dll
-```
-
-The runtime log should contain a PID-specific pipe, for example:
-
-```text
-U3D Viewer IL2CPP agent loaded. Pipe: u3d-viewer-12345
-Waiting for viewer on pipe 'u3d-viewer-12345'...
-```
-
-## 4. Build and run the standalone Viewer
-
-Build the selected Agent first, then build the Viewer:
-
-```powershell
-dotnet build src/U3DViewer.Viewer/U3DViewer.Viewer.csproj -c Release
-```
-
-With the repository VSCode workflow, `Ctrl+Shift+B` already performs the correct build order.
+## 2. Start Viewer
 
 Run:
 
-```powershell
-.\src\U3DViewer.Viewer\bin\Release\net8.0\U3DViewer.Viewer.exe
+```text
+src/U3DViewer.Viewer/bin/Release/net8.0/U3DViewer.Viewer.exe
 ```
 
-The first window is a Unity process picker. It lists detected Unity standalone processes with process name/PID, backend, Agent state, and executable path.
+The first window lists detected Unity processes.
 
-### Ready process
+### Existing process
 
-Select a process with `Agent = Ready` and click `Attach`. The main Viewer opens against only that process's `u3d-viewer-<PID>` pipe.
+- `Ready` -> click `Attach`.
+- `Not detected` -> click `Prepare + Restart`.
+- `Busy` -> another Viewer already owns that Agent connection.
 
-### Running process without Agent
+`Prepare + Restart` asks an existing game session to close normally. It does not force-kill a game the user was already running.
 
-If a process is detected as Unity and its Agent is `Not detected`, and the matching bundled payload plus BepInEx are available, the action changes to `Install + Restart`.
+### Game not running
 
-The Viewer performs:
+Click `Open Game...` and select the Unity game executable.
+
+## 3. What the GUI prepares automatically
+
+For Mono:
 
 ```text
-copy Agent -> BepInEx/plugins/U3DViewer
-copy U3DViewer.Protocol.dll -> BepInEx/plugins/U3DViewer
-copy U3DViewer.NativeBridge.dll -> game directory
-request graceful game close
-relaunch the selected executable
-wait for the new u3d-viewer-<PID> pipe
-open the main Viewer automatically
+select Game.exe
+  -> detect Mono
+  -> install BepInEx 6 x64 if missing
+  -> use <Game>_Data/Managed as compile references
+  -> build U3DViewer.Agent.Mono.dll on demand
+  -> deploy plugin + protocol + NativeBridge
+  -> launch game
+  -> wait for u3d-viewer-<PID>
+  -> open Viewer
 ```
 
-The Viewer does not force-kill a process that refuses to close. In that case the deployment remains installed and the UI asks you to close/relaunch the game manually.
+For IL2CPP:
 
-### Launch a game from the Viewer
+```text
+select Game.exe
+  -> detect IL2CPP
+  -> install BepInEx 6 x64 if missing
+  -> if BepInEx/interop is missing:
+       launch a temporary bootstrap game process
+       wait for interop generation
+       stop that bootstrap process
+  -> build U3DViewer.Agent.IL2CPP.dll against BepInEx/interop
+  -> deploy plugin + protocol + NativeBridge
+  -> launch game
+  -> wait for u3d-viewer-<PID>
+  -> open Viewer
+```
 
-Click `Open Game...`, select a Unity `.exe`, and U3DViewer will detect Mono/IL2CPP, deploy the matching bundled Agent, start the executable, wait up to 30 seconds for the PID-specific Agent pipe, and open the main Viewer automatically.
+The runtime bootstrap is pinned to BepInEx `6.0.0-be.785`, matching the Agent package references.
 
-This is launch/install automation, not generic remote DLL injection into an arbitrary running process.
+## 4. Expected Viewer
 
-## 5. Main Viewer
-
-The main window contains:
+After connection, the main window contains:
 
 - Runtime Hierarchy
 - Runtime Inspector
 - Scene View
-- Reset / Perspective / Orthographic / Focus Selected controls
-- WASD/QE movement and arrow-key look controls when Scene View has focus
+- Reset / Perspective / Orthographic / Focus Selected
+- WASD/QE movement and arrow-key camera look
 
-When everything is working:
+## Troubleshooting
 
-```text
-Built Unity game (PID N)
-  -> Mono or IL2CPP Agent
-  -> u3d-viewer-N control/data pipe
-  -> Scene Camera
-  -> 1280x720 RenderTexture
-  -> NativeBridge writer
-  -> named D3D11 shared Texture2D
-  -> NativeBridge reader in U3DViewer.exe
-  -> staging readback
-  -> Avalonia WriteableBitmap
-  -> live Scene View
-```
-
-The status strip inside Scene View reports bridge problems such as:
-
-- target is not using Direct3D 11
-- `U3DViewer.NativeBridge.dll` is missing
-- shared texture could not be opened
-- native API versions do not match
-
-## Current controls
-
-Click the Scene View first, then use:
+If automatic Agent compilation fails, the process picker shows the tail of `dotnet build` output. The temporary build workspace is under:
 
 ```text
-W / S      forward / backward
-A / D      left / right
-Q / E      down / up
-Arrow keys look around
+%LOCALAPPDATA%\U3DViewer\AgentBuilder\
 ```
 
-Use `Focus Selected` after selecting a GameObject in Runtime Hierarchy.
+If BepInEx or IL2CPP bootstrap fails, inspect:
+
+```text
+<Game>\BepInEx\LogOutput.log
+```
+
+The main expected failure classes are:
+
+- no write permission to the game directory
+- no internet connection when BepInEx must be downloaded
+- missing .NET SDK for on-demand Agent compilation
+- unsupported/custom Unity executable layout
+- target game is not running Direct3D 11 for Scene View
 
 ## Current limitations
 
-- GUI automation requires a matching BepInEx 6 runtime to already exist in the game directory.
-- `Open Game...` launches the selected executable directly and does not preserve launcher-specific command-line arguments.
-- Unity process detection currently targets Windows standalone player layouts and can miss unusual/custom launch layouts.
-- Scene target size is fixed at 1280x720.
-- Scene image presentation currently uses a GPU-to-CPU staging readback; direct GPU presentation is a later optimization.
-- Direct3D 12 and Vulkan are not supported by the Scene transport yet.
-- A full recursive hierarchy snapshot is captured once per second; large scenes need incremental updates later.
-- Component values are not inspected yet; only component type names are captured.
-- IL2CPP component names currently use the managed proxy type exposed by Il2CppInterop.
-- `DontDestroyOnLoad`/hidden runtime objects are not specially enumerated yet.
-- Picking, collider visualization and transform gizmos are not implemented yet.
-- There is no GitHub Actions workflow; build and runtime validation are local/manual.
+- Windows x64 only for automatic runtime preparation
+- D3D11 Scene transport only
+- Agent compilation currently uses the locally installed .NET SDK
+- Scene image path still uses staging readback
+- picking, colliders and transform gizmos are not implemented yet

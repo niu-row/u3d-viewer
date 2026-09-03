@@ -24,68 +24,17 @@
       }
     },
     {
-      "label": "U3DViewer: Build + Deploy",
-      "dependsOrder": "sequence",
-      "dependsOn": [
-        "U3DViewer: Build",
-        "U3DViewer: Deploy"
-      ],
+      "label": "U3DViewer: Run Viewer",
+      "type": "process",
+      "command": "${workspaceFolder}/src/U3DViewer.Viewer/bin/Release/net8.0/U3DViewer.Viewer.exe",
       "problemMatcher": []
     },
     {
-      "label": "U3DViewer: Deploy",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/deploy.ps1"
-      ],
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared"
-      }
-    },
-    {
-      "label": "U3DViewer: Build + Deploy + Run Viewer",
+      "label": "U3DViewer: Build + Run Viewer",
       "dependsOrder": "sequence",
       "dependsOn": [
         "U3DViewer: Build",
-        "U3DViewer: Deploy + Run Viewer"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "U3DViewer: Deploy + Run Viewer",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/deploy.ps1",
-        "-LaunchViewer"
-      ],
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared"
-      }
-    },
-    {
-      "label": "U3DViewer: Create Local Config",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "if (Test-Path '${workspaceFolder}/u3dviewer.local.json') { Write-Host 'u3dviewer.local.json already exists.' } else { Copy-Item '${workspaceFolder}/u3dviewer.local.json.example' '${workspaceFolder}/u3dviewer.local.json'; Write-Host 'Created u3dviewer.local.json. gamePath is optional for the default build; set it when you want to build a target-specific Agent payload or use deploy.ps1.' }"
+        "U3DViewer: Run Viewer"
       ],
       "problemMatcher": []
     }

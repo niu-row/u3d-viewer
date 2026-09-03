@@ -1,131 +1,101 @@
 # u3d-viewer
 
-Runtime scene inspection for already-built Unity games.
+Standalone runtime inspection for already-built Unity games.
 
-The project is split into a game-side runtime agent and a standalone viewer:
+## User flow
 
-- **U3DViewer.Agent.Mono** runs inside an authorized Unity Mono game via BepInEx and reads the live Unity scene graph.
-- **U3DViewer.Agent.IL2CPP** does the same for Unity IL2CPP games through BepInEx 6 + Il2CppInterop.
-- **U3DViewer.Protocol** contains the runtime-neutral wire messages shared by both agents and the viewer.
-- **U3DViewer.Viewer** is a standalone .NET 8 + Avalonia desktop application.
-- **U3DViewer.NativeBridge** transports the runtime Scene Camera through a named D3D11 shared texture.
-
-## VSCode quick start
-
-The repository includes `.vscode/tasks.json` plus local PowerShell build/deploy scripts.
-
-Press `Ctrl+Shift+B` to run the default `U3DViewer: Build` task.
-
-The default build no longer requires `u3dviewer.local.json` or a valid `gamePath`. It always builds:
+The normal workflow is GUI-first. There is no required `gamePath` or `backend` config file.
 
 ```text
-NativeBridge x64
-  -> any Agent backend whose Unity references are already available
-  -> Viewer
+Ctrl+Shift+B
+  -> build Viewer + NativeBridge + bundled Agent Builder sources
+
+U3DViewer.Viewer.exe
+  -> choose a running Unity process
+       Ready              -> Attach
+       Agent not detected -> Prepare + Restart
+  OR Open Game...
+       -> choose Game.exe
+
+U3DViewer then automatically:
+  -> detects Mono / IL2CPP
+  -> installs the pinned matching BepInEx 6 x64 runtime when missing
+  -> for IL2CPP, starts the game once when interop assemblies need generation
+  -> builds the Agent against that game's Unity assemblies
+  -> deploys Agent + Protocol + NativeBridge
+  -> launches/restarts the game
+  -> waits for u3d-viewer-<PID>
+  -> opens Hierarchy / Inspector / Scene View
 ```
 
-If `u3dviewer.local.json` contains a valid `backend` + `gamePath`, the build also stages that game's Unity reference assemblies when necessary and builds the matching Agent payload. If no usable Unity references are available, the build prints a warning and still produces Viewer + NativeBridge instead of failing.
+A running game selected through `Prepare + Restart` is only asked to close normally; U3DViewer does not force-kill an existing user session. A temporary IL2CPP bootstrap process launched by U3DViewer itself may be terminated after interop generation completes.
 
-When the Viewer is built after an Agent, that Agent DLL is bundled under `payload/Mono` or `payload/IL2CPP`. This enables GUI-side `Install + Restart` / `Open Game...` deployment for that backend.
+## Build in VSCode
 
-`u3dviewer.local.json` is now optional for the normal GUI-first workflow. It is still useful when you want to prebuild a target-specific Agent payload or use the explicit `Deploy` tasks. Local config and build output are ignored by Git. For IL2CPP, BepInEx must have generated `BepInEx/interop` before a target-specific IL2CPP Agent can be built.
+Requirements for building the development checkout:
 
-Other VSCode tasks include `Build + Deploy`, deploy-only, and `Build + Deploy + Run Viewer`.
+- Windows x64
+- .NET 8 SDK
+- Visual Studio 2022 C++ workload with Windows SDK and CMake
 
-## GUI launch / attach automation
-
-`U3DViewer.Viewer.exe` starts with a Unity process picker instead of connecting to one global pipe.
-
-The picker scans running Windows processes for Unity standalone layout markers such as `UnityPlayer.dll` / `<Game>_Data/globalgamemanagers`, detects Mono vs IL2CPP when possible, and reports the U3DViewer Agent state.
-
-Each Agent owns a process-specific pipe:
+Press `Ctrl+Shift+B`. The default task runs `scripts/build.ps1` and builds:
 
 ```text
-u3d-viewer-<PID>
+build/native/Release/U3DViewer.NativeBridge.dll
+src/U3DViewer.Viewer/bin/Release/net8.0/U3DViewer.Viewer.exe
+src/U3DViewer.Viewer/bin/Release/net8.0/agent-builder/...
 ```
 
-The picker supports three normal workflows:
+No target game path is needed during this build.
+
+The Viewer-side Agent Builder copies its bundled source workspace to `%LOCALAPPDATA%/U3DViewer/AgentBuilder/`, then runs the local .NET SDK only after a target game has been selected. Mono references come from `<Game>_Data/Managed`; IL2CPP references come from `BepInEx/interop` after BepInEx generates them.
+
+## Runtime architecture
 
 ```text
-Agent Ready
-  -> Attach
-
-Unity process + Agent Not detected
-  -> Install + Restart
-  -> copy bundled Agent + Protocol + NativeBridge
-  -> request a graceful game close
-  -> relaunch the game
-  -> wait for u3d-viewer-<new PID>
-  -> open Viewer automatically
-
-Open Game...
-  -> choose a Unity .exe
-  -> detect Mono / IL2CPP
-  -> deploy the bundled Agent
-  -> launch the game
-  -> wait for Agent Ready
-  -> open Viewer automatically
+Unity Game.exe
+├─ BepInEx 6
+├─ U3DViewer.Agent.Mono.dll OR U3DViewer.Agent.IL2CPP.dll
+├─ U3DViewer.Protocol.dll
+└─ U3DViewer.NativeBridge.dll
+        │
+        ├─ Named Pipe: u3d-viewer-<PID>
+        └─ D3D11 named shared Texture2D
+                ▼
+U3DViewer.Viewer.exe
+├─ process picker
+├─ automatic runtime preparation
+├─ Runtime Hierarchy
+├─ Runtime Inspector
+└─ Scene View
 ```
 
-`Install + Restart` does not force-kill the game. If the process refuses a graceful close, U3DViewer leaves it running and asks the user to close it manually. The GUI automation also does not perform generic remote DLL injection into an arbitrary live process.
+## Current capabilities
 
-A matching BepInEx 6 runtime must already be installed in the target game. If BepInEx is absent, the picker reports that GUI installation is unavailable rather than silently installing a runtime build that may not match the game.
+- running Unity process discovery
+- Mono / IL2CPP detection
+- per-process Agent pipes
+- GUI `Attach`, `Prepare + Restart`, and `Open Game...`
+- automatic BepInEx 6 x64 bootstrap when absent
+- automatic target-specific Agent build and deployment
+- live Runtime Hierarchy
+- read-only Runtime Inspector
+- Scene Camera controls
+- D3D11 Scene View transport through a named shared texture
+- first Viewer presentation path through staging readback into Avalonia
 
-This allows multiple Unity games to run at the same time without their Viewer connections colliding. An Agent already occupied by another Viewer is shown as `Busy`.
-
-## Current milestone
-
-M2 desktop UI and M3 Scene Camera control are implemented. M4 now has an initial end-to-end Scene View transport implementation ready for local runtime validation.
-
-Implemented:
-
-- startup Unity process picker with PID/backend/Agent status
-- GUI `Attach`, `Install + Restart`, and `Open Game...` workflows
-- Agent payload bundled into the Viewer output for GUI deployment
-- per-process Named Pipe connection (`u3d-viewer-<PID>`)
-- automatic connection/reconnection to the selected Mono or IL2CPP agent
-- live Runtime Hierarchy tree
-- selection that survives ordinary snapshot refreshes
-- read-only Runtime Inspector for GameObject state, Transform and component type names
-- bidirectional Named Pipe control channel
-- isolated runtime Scene Camera controller in both Mono and IL2CPP agents
-- camera reset, perspective/orthographic switch, focus selected, keyboard move/look commands
-- 1280x720 runtime RenderTexture rendered by the target game
-- D3D11 named shared texture transport with keyed-mutex synchronization
-- render-target metadata published through `SceneSnapshot.RenderTarget`
-- Viewer-side opening of the named D3D11 texture
-- first live Scene View presentation path through a staging readback into an Avalonia `WriteableBitmap`
-- connection, snapshot and Scene transport status
-
-The first M4 Viewer path intentionally uses GPU-to-CPU staging readback. It is meant to prove the complete pipeline against real games before replacing the readback with direct GPU presentation.
-
-## Scope
+## Current limitations
 
 - Windows x64 first
-- Unity Mono and IL2CPP
-- BepInEx 6
-- Direct3D 11 Scene transport first
-- read-only inspection first
-- Named Pipe for runtime metadata/control
-- D3D11 shared resource for Scene View pixels
-- standalone Viewer independent from the target game's Unity version
+- Scene transport currently requires Direct3D 11
+- the development build currently expects a local .NET SDK for on-demand Agent compilation
+- unusual/custom Unity launchers can require additional process discovery handling
+- Scene View is fixed at 1280x720 and currently uses GPU-to-CPU staging readback
+- picking, collider visualization and transform gizmos are not implemented yet
 - no GitHub Actions; validation is local/manual
-
-## Runtime render path
-
-```text
-Built Unity game
-  -> Mono or IL2CPP Agent
-  -> Scene Camera
-  -> RenderTexture
-  -> U3DViewer.NativeBridge.dll
-  -> named D3D11 shared Texture2D
-  -> U3DViewer.Viewer.exe
-  -> Avalonia Scene View
-```
 
 ## Start here
 
-- `docs/getting-started.md` — Mono/IL2CPP build and first runtime test
-- `docs/architecture.md` — target architecture and milestones
-- `native/U3DViewer.NativeBridge/README.md` — native bridge build/deployment and M4 limitations
+- `docs/getting-started.md`
+- `docs/architecture.md`
+- `native/U3DViewer.NativeBridge/README.md`
