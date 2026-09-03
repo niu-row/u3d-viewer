@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -10,14 +12,11 @@ internal sealed record AgentBuildResult(
     string? AgentPath = null,
     string? ProtocolPath = null);
 
+internal sealed record UnityReferenceSet(string CorePath, string ScenePath);
+
 internal static class AgentBuilder
 {
     private const string Configuration = "Release";
-    private static readonly string[] RequiredUnityAssemblies =
-    {
-        "UnityEngine.CoreModule.dll",
-        "UnityEngine.SceneManagementModule.dll"
-    };
 
     public static bool CanBuild(out string reason)
     {
@@ -54,11 +53,11 @@ internal static class AgentBuilder
             return false;
         }
 
-        if (HasRequiredReferences(executablePath, backend, out var referenceDirectory))
+        if (TryResolveUnityReferences(executablePath, backend, out var references, out _))
         {
             try
             {
-                var fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, referenceDirectory);
+                var fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, references!);
                 if (TryGetCachedAgent(backend, fingerprint, out _, out _))
                 {
                     return true;
@@ -81,9 +80,66 @@ internal static class AgentBuilder
 
     public static bool HasRequiredReferences(string executablePath, string backend, out string referenceDirectory)
     {
-        var resolvedReferenceDirectory = GetReferenceDirectory(executablePath, backend);
-        referenceDirectory = resolvedReferenceDirectory;
-        return RequiredUnityAssemblies.All(file => File.Exists(Path.Combine(resolvedReferenceDirectory, file)));
+        referenceDirectory = GetReferenceDirectory(executablePath, backend);
+        return TryResolveUnityReferences(executablePath, backend, out _, out _);
+    }
+
+    public static bool TryResolveUnityReferences(
+        string executablePath,
+        string backend,
+        out UnityReferenceSet? references,
+        out string error)
+    {
+        references = null;
+        error = string.Empty;
+
+        var referenceDirectory = GetReferenceDirectory(executablePath, backend);
+        if (!Directory.Exists(referenceDirectory))
+        {
+            error = backend == "IL2CPP"
+                ? $"IL2CPP interop directory does not exist yet: {referenceDirectory}"
+                : $"Unity managed directory does not exist: {referenceDirectory}";
+            return false;
+        }
+
+        string[] candidates;
+        try
+        {
+            candidates = Directory
+                .EnumerateFiles(referenceDirectory, "UnityEngine*.dll", SearchOption.TopDirectoryOnly)
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not enumerate Unity assemblies in {referenceDirectory}: {ex.Message}";
+            return false;
+        }
+
+        if (candidates.Length == 0)
+        {
+            error = $"No UnityEngine assemblies were found in {referenceDirectory}.";
+            return false;
+        }
+
+        var corePath = candidates.FirstOrDefault(path =>
+            AssemblyDefinesType(path, "UnityEngine", "GameObject"));
+        if (corePath is null)
+        {
+            error = $"Interop generation produced {candidates.Length} Unity assemblies, but none defines UnityEngine.GameObject.";
+            return false;
+        }
+
+        var scenePath = candidates.FirstOrDefault(path =>
+            AssemblyDefinesType(path, "UnityEngine.SceneManagement", "SceneManager"));
+        if (scenePath is null)
+        {
+            error = $"Interop generation produced {candidates.Length} Unity assemblies, but none defines UnityEngine.SceneManagement.SceneManager.";
+            return false;
+        }
+
+        references = new UnityReferenceSet(corePath, scenePath);
+        return true;
     }
 
     public static async Task<AgentBuildResult> BuildAsync(
@@ -103,20 +159,16 @@ internal static class AgentBuilder
             return new AgentBuildResult(false, "Viewer Agent Builder payload is missing. Rebuild U3DViewer.Viewer.");
         }
 
-        if (!HasRequiredReferences(executablePath, backend, out var referenceDirectory))
+        if (!TryResolveUnityReferences(executablePath, backend, out var references, out var referenceError))
         {
-            return new AgentBuildResult(
-                false,
-                backend == "IL2CPP"
-                    ? "IL2CPP interop assemblies are not ready yet."
-                    : $"Unity managed reference assemblies are missing from {referenceDirectory}.");
+            return new AgentBuildResult(false, referenceError);
         }
 
         string fingerprint;
         try
         {
             progress?.Report($"Checking {backend} Agent compatibility cache...");
-            fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, referenceDirectory);
+            fingerprint = ComputeCompatibilityFingerprint(sourceRoot, backend, references!);
         }
         catch (Exception ex)
         {
@@ -182,7 +234,8 @@ internal static class AgentBuilder
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add(Configuration);
         startInfo.ArgumentList.Add("--nologo");
-        startInfo.ArgumentList.Add($"-p:UnityReferenceDir={referenceDirectory}");
+        startInfo.ArgumentList.Add($"-p:UnityCoreReference={references!.CorePath}");
+        startInfo.ArgumentList.Add($"-p:UnitySceneReference={references.ScenePath}");
 
         try
         {
@@ -233,7 +286,11 @@ internal static class AgentBuilder
             File.Copy(protocolPath, cacheProtocol, overwrite: true);
             File.WriteAllText(
                 Path.Combine(cacheDirectory, "compatibility.txt"),
-                $"backend={backend}{Environment.NewLine}fingerprint={fingerprint}{Environment.NewLine}builtUtc={DateTime.UtcNow:O}{Environment.NewLine}");
+                $"backend={backend}{Environment.NewLine}" +
+                $"fingerprint={fingerprint}{Environment.NewLine}" +
+                $"core={references.CorePath}{Environment.NewLine}" +
+                $"scene={references.ScenePath}{Environment.NewLine}" +
+                $"builtUtc={DateTime.UtcNow:O}{Environment.NewLine}");
 
             progress?.Report($"Cached {backend} Agent profile {ShortFingerprint(fingerprint)} for future launches.");
             return new AgentBuildResult(
@@ -256,10 +313,10 @@ internal static class AgentBuilder
     private static string ComputeCompatibilityFingerprint(
         string sourceRoot,
         string backend,
-        string referenceDirectory)
+        UnityReferenceSet references)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        AppendText(hash, "U3DViewer-Agent-Compatibility-v1");
+        AppendText(hash, "U3DViewer-Agent-Compatibility-v2");
         AppendText(hash, backend);
 
         var projectFolder = GetProjectFolder(backend);
@@ -284,14 +341,46 @@ internal static class AgentBuilder
             AppendFileHash(hash, file);
         }
 
-        foreach (var assemblyName in RequiredUnityAssemblies)
-        {
-            var path = Path.Combine(referenceDirectory, assemblyName);
-            AppendText(hash, "runtime:" + assemblyName);
-            AppendFileHash(hash, path);
-        }
+        AppendReference(hash, "core", references.CorePath);
+        AppendReference(hash, "scene", references.ScenePath);
 
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static void AppendReference(IncrementalHash hash, string role, string path)
+    {
+        AppendText(hash, $"runtime:{role}:{Path.GetFileName(path)}");
+        AppendFileHash(hash, path);
+    }
+
+    private static bool AssemblyDefinesType(string path, string @namespace, string name)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var peReader = new PEReader(stream);
+            if (!peReader.HasMetadata)
+            {
+                return false;
+            }
+
+            var metadata = peReader.GetMetadataReader();
+            foreach (var handle in metadata.TypeDefinitions)
+            {
+                var definition = metadata.GetTypeDefinition(handle);
+                if (metadata.StringComparer.Equals(definition.Namespace, @namespace) &&
+                    metadata.StringComparer.Equals(definition.Name, name))
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // Ignore native/corrupt/temporarily incomplete files while interop generation is still running.
+        }
+
+        return false;
     }
 
     private static void AddFiles(List<string> files, string directory)
@@ -322,7 +411,7 @@ internal static class AgentBuilder
 
     private static void AppendFileHash(IncrementalHash hash, string path)
     {
-        using var file = File.OpenRead(path);
+        using var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var digest = SHA256.HashData(file);
         hash.AppendData(digest);
     }
