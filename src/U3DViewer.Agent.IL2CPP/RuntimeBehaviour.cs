@@ -21,6 +21,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static SceneScanner.SceneScanSession? _sceneScan;
     private static Task<SerializedSnapshot>? _snapshotSerialization;
     private static readonly HashSet<int> ExpandedInstanceIds = new();
+    private static readonly HashSet<long> ExpandedSceneKeys = new();
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
@@ -57,6 +58,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sceneScan = null;
         _snapshotSerialization = null;
         ExpandedInstanceIds.Clear();
+        ExpandedSceneKeys.Clear();
         _nextSnapshotAt = 0f;
         _sequence = 0;
         _selectedInstanceId = 0;
@@ -81,6 +83,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             ResetSnapshotState();
             ExpandedInstanceIds.Clear();
+            ExpandedSceneKeys.Clear();
             _nextSnapshotAt = 0f;
             _interactiveHierarchyRefresh = false;
             return;
@@ -117,6 +120,21 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                         _interactiveHierarchyRefresh = true;
                         RestartHierarchyScan();
                         continue;
+                    case ViewerCommandKind.SceneExpanded:
+                    {
+                        var sceneKey = ViewerCommandCodec.BuildSceneKey(command.InstanceId, command.CullingMask);
+                        if (command.Flag)
+                        {
+                            ExpandedSceneKeys.Add(sceneKey);
+                        }
+                        else
+                        {
+                            ExpandedSceneKeys.Remove(sceneKey);
+                        }
+                        _interactiveHierarchyRefresh = true;
+                        RestartHierarchyScan();
+                        continue;
+                    }
                     default:
                         _sceneCamera?.Apply(command);
                         if (command.Kind == ViewerCommandKind.CameraCullingMask)
@@ -186,7 +204,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                 _sceneScan = SceneScanner.Begin(
                     ++_sequence,
                     _selectedInstanceId,
-                    new HashSet<int>(ExpandedInstanceIds));
+                    new HashSet<int>(ExpandedInstanceIds),
+                    new HashSet<long>(ExpandedSceneKeys));
             }
             catch (Exception ex)
             {
@@ -248,6 +267,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         RestoreBackgroundExecution();
         ResetSnapshotState();
         ExpandedInstanceIds.Clear();
+        ExpandedSceneKeys.Clear();
         _interactiveHierarchyRefresh = false;
         _sceneCulling = null;
         _sceneCamera?.Dispose();
