@@ -89,11 +89,28 @@ select Game.exe
 
 The runtime bootstrap is pinned to BepInEx `6.0.0-be.785`, matching the Agent package references.
 
-Agent builds are cached under:
+Game-specific Viewer data stays under one directory beside the selected game executable:
 
 ```text
-%LOCALAPPDATA%\U3DViewer\AgentCache\<Backend>\<compatibility-fingerprint>\
+<Game>\U3DViewer\
+├─ Settings\scene.json
+├─ Downloads\
+├─ AgentCache\<Backend>\<compatibility-fingerprint>\
+├─ Temp\AgentBuilder\<Backend>-<ViewerPID>\
+└─ Logs\viewer-*.log
 ```
+
+Successful Agent builds are copied into `AgentCache` and their temporary `Temp/AgentBuilder` workspace is removed. A failed build keeps its workspace so the failure can be inspected.
+
+Viewer-global data is kept beside `U3DViewer.Viewer.exe` instead of under the user profile:
+
+```text
+<Viewer>\U3DViewer\
+├─ language.txt
+└─ Logs\              # used before a game is selected
+```
+
+Once a game is selected, the active Viewer log moves into that game's `U3DViewer/Logs` directory.
 
 ## 4. Viewer layout
 
@@ -103,9 +120,7 @@ After connection, the main window contains:
 - read-only Runtime Inspector
 - GPU-native Scene View
 - Perspective / Orthographic controls
-- adjustable FOV, near/far clip planes, and orthographic size
-- adjustable idle/active Scene FPS and RenderTexture resolution
-- Scene Camera culling mask modes: All / Copy Main Camera / Manual Layers
+- a Scene Settings window for FOV, clipping planes, Scene FPS, resolution behavior, and culling
 - visible fly-camera speed
 - runtime performance metrics
 
@@ -123,16 +138,28 @@ Mouse wheel     adjust fly speed
 F               focus selected GameObject
 ```
 
+The Scene toolbar only keeps high-frequency actions. FOV, near/far clip planes, orthographic size, idle/active FPS, resolution behavior, and culling are configured from `Scene Settings`.
+
+By default, the Scene RenderTexture follows the actual Scene View control size and aspect ratio. Resizing is debounced so the shared texture is recreated only after the resize settles. Fixed resolution remains available by disabling automatic viewport matching.
+
 Default stream settings are:
 
 ```text
 Idle FPS        15
 Active FPS      30
-Width           1280
-Height          720
+Auto viewport   enabled
+Manual fallback 1280 x 720
 ```
 
-All four values are adjustable in the Viewer. Changing resolution recreates the Unity RenderTexture and D3D11 shared texture.
+Scene settings are persisted per game in:
+
+```text
+<Game>\U3DViewer\Settings\scene.json
+```
+
+This includes lens values, Scene FPS, automatic/manual resolution settings, and culling mode/mask. Reattaching to the same game restores the saved profile automatically.
+
+Changing resolution recreates the Unity RenderTexture and D3D11 shared texture. The Agent requests an immediate Scene-state snapshot after a stream change so the Viewer can switch to the new shared texture without waiting for the normal one-second snapshot cadence.
 
 The Scene pixel path is GPU-native:
 
@@ -149,26 +176,32 @@ There is no active CPU staging readback / `WriteableBitmap` path.
 
 ## Language
 
-Viewer UI currently supports English and Simplified Chinese. The first launch follows the system UI language, and the selected language is persisted under:
+Viewer UI currently supports English and Simplified Chinese. The first launch follows the system UI language, and the selected language is persisted beside the Viewer executable:
 
 ```text
-%LOCALAPPDATA%\U3DViewer\language.txt
+<Viewer>\U3DViewer\language.txt
 ```
 
 Technical diagnostics, build output, exception messages, and Unity component/type names remain in their original form.
 
 ## Troubleshooting
 
-Viewer diagnostics are written both to the development console and:
+Before a game is selected, Viewer diagnostics use:
 
 ```text
-%LOCALAPPDATA%\U3DViewer\Logs\viewer-*.log
+<Viewer>\U3DViewer\Logs\viewer-*.log
 ```
 
-If automatic Agent compilation fails, inspect the build output there. Temporary build workspaces are under:
+After selection, the active log is moved to:
 
 ```text
-%LOCALAPPDATA%\U3DViewer\AgentBuilder\
+<Game>\U3DViewer\Logs\viewer-*.log
+```
+
+If automatic Agent compilation fails, the failed temporary workspace remains under:
+
+```text
+<Game>\U3DViewer\Temp\AgentBuilder\
 ```
 
 If BepInEx or Agent loading fails, inspect:
@@ -185,6 +218,8 @@ Common failure classes include:
 - unsupported/custom Unity executable layout
 - target game not running Direct3D 11 for Scene View
 - game and Viewer unable to open the shared resource on the same DXGI adapter
+
+Older builds used `%LOCALAPPDATA%\U3DViewer`. Current builds no longer write runtime data there. Existing legacy files are left untouched rather than being deleted automatically.
 
 ## Current limitations
 
