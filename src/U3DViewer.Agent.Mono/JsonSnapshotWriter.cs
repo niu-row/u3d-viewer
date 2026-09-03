@@ -26,51 +26,6 @@ internal static class JsonSnapshotWriter
         return sb.ToString();
     }
 
-    public static string Write(SceneDelta delta)
-    {
-        var sb = new StringBuilder(4 * 1024);
-        sb.Append('{');
-        Property(sb, "type", delta.Type); sb.Append(',');
-        NumberProperty(sb, "sequence", delta.Sequence); sb.Append(',');
-        NumberProperty(sb, "unixTimeMs", delta.UnixTimeMs); sb.Append(',');
-        sb.Append("\"renderTarget\":");
-        WriteRenderTarget(sb, delta.RenderTarget);
-        sb.Append(',');
-        sb.Append("\"scenes\":[");
-        for (var i = 0; i < delta.Scenes.Length; i++)
-        {
-            if (i > 0) sb.Append(',');
-            WriteScene(sb, delta.Scenes[i]);
-        }
-        sb.Append("],\"removedInstanceIds\":[");
-        for (var i = 0; i < delta.RemovedInstanceIds.Length; i++)
-        {
-            if (i > 0) sb.Append(',');
-            sb.Append(delta.RemovedInstanceIds[i].ToString(CultureInfo.InvariantCulture));
-        }
-        sb.Append("],\"upserts\":[");
-        for (var i = 0; i < delta.Upserts.Length; i++)
-        {
-            if (i > 0) sb.Append(',');
-            WriteNodeDelta(sb, delta.Upserts[i]);
-        }
-        sb.Append("]}");
-        return sb.ToString();
-    }
-
-    private static void WriteNodeDelta(StringBuilder sb, SceneNodeDelta delta)
-    {
-        sb.Append('{');
-        NumberProperty(sb, "instanceId", delta.InstanceId); sb.Append(',');
-        NumberProperty(sb, "sceneBuildIndex", delta.SceneBuildIndex); sb.Append(',');
-        Property(sb, "sceneName", delta.SceneName); sb.Append(',');
-        NumberProperty(sb, "parentInstanceId", delta.ParentInstanceId); sb.Append(',');
-        NumberProperty(sb, "siblingIndex", delta.SiblingIndex); sb.Append(',');
-        sb.Append("\"gameObject\":");
-        WriteGameObject(sb, delta.GameObject);
-        sb.Append('}');
-    }
-
     private static void WriteRenderTarget(StringBuilder sb, RenderTargetInfo? target)
     {
         if (target is null)
@@ -118,6 +73,7 @@ internal static class JsonSnapshotWriter
         Property(sb, "name", go.Name); sb.Append(',');
         BoolProperty(sb, "activeSelf", go.ActiveSelf); sb.Append(',');
         BoolProperty(sb, "activeInHierarchy", go.ActiveInHierarchy); sb.Append(',');
+        NumberProperty(sb, "childCount", go.ChildCount); sb.Append(',');
         NumberProperty(sb, "layer", go.Layer); sb.Append(',');
         Property(sb, "tag", go.Tag); sb.Append(',');
         sb.Append("\"transform\":"); WriteTransform(sb, go.Transform); sb.Append(',');
