@@ -1,6 +1,6 @@
 # Getting started
 
-The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
+The current bootstrap supports both Unity Mono and IL2CPP agents, an Avalonia standalone Viewer, a startup Unity process picker, bidirectional Scene Camera control, and an initial Windows/D3D11 live Scene View transport.
 
 ## Requirements
 
@@ -61,11 +61,11 @@ Install these outputs into the game's `BepInEx/plugins/U3DViewer/` directory:
 - `U3DViewer.Agent.Mono.dll`
 - `U3DViewer.Protocol.dll`
 
-The log should contain:
+The log should contain a PID-specific pipe, for example:
 
 ```text
-U3D Viewer Mono agent loaded.
-Waiting for viewer on pipe 'u3d-viewer'...
+U3D Viewer Mono agent loaded. Pipe: u3d-viewer-12345
+Waiting for viewer on pipe 'u3d-viewer-12345'...
 ```
 
 ## 3. IL2CPP setup
@@ -95,11 +95,11 @@ Install these outputs into the game's `BepInEx/plugins/U3DViewer/` directory:
 - `U3DViewer.Agent.IL2CPP.dll`
 - `U3DViewer.Protocol.dll`
 
-The log should contain:
+The log should contain a PID-specific pipe, for example:
 
 ```text
-U3D Viewer IL2CPP agent loaded.
-Waiting for viewer on pipe 'u3d-viewer'...
+U3D Viewer IL2CPP agent loaded. Pipe: u3d-viewer-12345
+Waiting for viewer on pipe 'u3d-viewer-12345'...
 ```
 
 ## 4. Build and run the standalone Viewer
@@ -124,7 +124,16 @@ Run:
 dotnet run --project src/U3DViewer.Viewer/U3DViewer.Viewer.csproj
 ```
 
-The window contains:
+The first window is a Unity process picker. It lists detected Unity standalone processes with:
+
+- process name and PID
+- Mono / IL2CPP / Unknown backend
+- Agent state: Ready, Busy, or Not detected
+- executable path
+
+Select a `Ready` process and click `Connect`. The main Viewer then opens against only that process's `u3d-viewer-<PID>` pipe.
+
+The main window contains:
 
 - Runtime Hierarchy
 - Runtime Inspector
@@ -137,8 +146,9 @@ The window contains:
 When everything is working:
 
 ```text
-Built Unity game
+Built Unity game (PID N)
   -> Mono or IL2CPP Agent
+  -> u3d-viewer-N control/data pipe
   -> Scene Camera
   -> 1280x720 RenderTexture
   -> NativeBridge writer
@@ -171,6 +181,7 @@ Use `Focus Selected` after selecting a GameObject in Runtime Hierarchy.
 
 ## Current limitations
 
+- Unity process detection currently targets Windows standalone player layouts and can miss unusual/custom launch layouts.
 - Scene target size is fixed at 1280x720.
 - Scene image presentation currently uses a GPU-to-CPU staging readback; direct GPU presentation is a later optimization.
 - Direct3D 12 and Vulkan are not supported by the Scene transport yet.
