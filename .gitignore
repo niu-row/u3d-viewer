@@ -1,0 +1,24 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+
+# Build output
+artifacts/
+dist/
+
+# Local Unity/BepInEx references
+lib/
+*.local.props
+
+# Native build output (future)
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# OS
+.DS_Store
+Thumbs.db
