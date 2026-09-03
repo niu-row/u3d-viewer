@@ -18,12 +18,14 @@ internal sealed class NativeSceneHost : NativeControlHost
     private readonly Action<string> _sendCommand;
     private readonly Action _focusSelected;
     private readonly DispatcherTimer _timer = new();
+    private readonly DispatcherTimer _resizeRecoveryTimer = new();
 
     private IntPtr _hostWindow;
     private RenderTargetInfo? _target;
     private string _targetKey = string.Empty;
     private bool _presenterOpen;
     private int _presentInFlight;
+    private int _resizePending;
     private DateTime _lastOpenAttemptUtc = DateTime.MinValue;
     private long _lastTickTimestamp = Stopwatch.GetTimestamp();
     private float _moveSpeed = 10f;
@@ -38,6 +40,10 @@ internal sealed class NativeSceneHost : NativeControlHost
         _timer.Interval = TimeSpan.FromMilliseconds(16);
         _timer.Tick += OnTick;
         _timer.Start();
+
+        _resizeRecoveryTimer.Interval = TimeSpan.FromMilliseconds(300);
+        _resizeRecoveryTimer.Tick += OnResizeRecoveryTick;
+        SizeChanged += OnHostSizeChanged;
     }
 
     public event Action<string>? StatusChanged;
@@ -51,6 +57,8 @@ internal sealed class NativeSceneHost : NativeControlHost
         {
             _target = null;
             _targetKey = string.Empty;
+            _resizeRecoveryTimer.Stop();
+            Interlocked.Exchange(ref _resizePending, 0);
             ClosePresenter();
             SetStatus(target?.Status ?? "Waiting for the target game's Scene render target...");
             return;
@@ -83,6 +91,8 @@ internal sealed class NativeSceneHost : NativeControlHost
     public void Shutdown()
     {
         _timer.Stop();
+        _resizeRecoveryTimer.Stop();
+        Interlocked.Exchange(ref _resizePending, 0);
         ClosePresenter();
     }
 
@@ -110,11 +120,52 @@ internal sealed class NativeSceneHost : NativeControlHost
     {
         if (control.Handle == _hostWindow)
         {
+            _resizeRecoveryTimer.Stop();
+            Interlocked.Exchange(ref _resizePending, 0);
             ClosePresenter();
             _hostWindow = IntPtr.Zero;
         }
 
         base.DestroyNativeControlCore(control);
+    }
+
+    private void OnHostSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (_hostWindow == IntPtr.Zero || e.NewSize.Width < 1 || e.NewSize.Height < 1)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _resizePending, 1);
+        _resizeRecoveryTimer.Stop();
+        _resizeRecoveryTimer.Start();
+    }
+
+    private void OnResizeRecoveryTick(object? sender, EventArgs e)
+    {
+        _resizeRecoveryTimer.Stop();
+
+        if (_hostWindow == IntPtr.Zero || _target is null)
+        {
+            Interlocked.Exchange(ref _resizePending, 0);
+            return;
+        }
+
+        // Never tear down the native presenter while a background Present call is still inside it.
+        // A queued-but-not-started Present observes _resizePending and exits without touching DXGI.
+        if (Volatile.Read(ref _presentInFlight) != 0)
+        {
+            _resizeRecoveryTimer.Start();
+            return;
+        }
+
+        ClosePresenter();
+        Interlocked.Exchange(ref _resizePending, 0);
+        TryOpenPresenter(force: true);
+        if (_presenterOpen)
+        {
+            QueuePresent();
+        }
     }
 
     private void OnTick(object? sender, EventArgs e)
@@ -129,12 +180,12 @@ internal sealed class NativeSceneHost : NativeControlHost
             return;
         }
 
-        if (!_presenterOpen && _target is not null)
+        if (!_presenterOpen && _target is not null && Volatile.Read(ref _resizePending) == 0)
         {
             TryOpenPresenter(force: false);
         }
 
-        if (_presenterOpen)
+        if (_presenterOpen && Volatile.Read(ref _resizePending) == 0)
         {
             QueuePresent();
         }
@@ -145,7 +196,8 @@ internal sealed class NativeSceneHost : NativeControlHost
     private void QueuePresent()
     {
         var window = _hostWindow;
-        if (window == IntPtr.Zero || !_presenterOpen || Interlocked.CompareExchange(ref _presentInFlight, 1, 0) != 0)
+        if (window == IntPtr.Zero || !_presenterOpen || Volatile.Read(ref _resizePending) != 0 ||
+            Interlocked.CompareExchange(ref _presentInFlight, 1, 0) != 0)
         {
             return;
         }
@@ -158,6 +210,11 @@ internal sealed class NativeSceneHost : NativeControlHost
 
             try
             {
+                if (Volatile.Read(ref _resizePending) != 0)
+                {
+                    return;
+                }
+
                 presentResult = U3DViewer_PresentScene(window);
                 if (presentResult < 0)
                 {
@@ -203,7 +260,7 @@ internal sealed class NativeSceneHost : NativeControlHost
     private void TryOpenPresenter(bool force)
     {
         var target = _target;
-        if (_hostWindow == IntPtr.Zero || target is null || _presenterOpen)
+        if (_hostWindow == IntPtr.Zero || target is null || _presenterOpen || Volatile.Read(ref _resizePending) != 0)
         {
             return;
         }
