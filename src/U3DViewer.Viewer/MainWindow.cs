@@ -19,7 +19,10 @@ internal sealed class MainWindow : Window
     private readonly InspectorPanel _inspectorPanel;
     private readonly ScenePanel _scenePanel;
     private readonly DispatcherTimer _sceneBootstrapTimer = new();
+    private readonly object _snapshotDispatchLock = new();
 
+    private SceneSnapshot? _pendingSnapshot;
+    private bool _snapshotDispatchScheduled;
     private int _sceneBootstrapAttempts;
     private bool _sceneTargetReady;
     private bool _sceneVisibilitySent;
@@ -69,7 +72,7 @@ internal sealed class MainWindow : Window
         Content = BuildLayout();
 
         _connection.StateChanged += state => Dispatcher.UIThread.Post(() => UpdateConnectionState(state));
-        _connection.SnapshotReceived += snapshot => Dispatcher.UIThread.Post(() => ApplySnapshot(snapshot));
+        _connection.SnapshotReceived += QueueSnapshotForUi;
         _connection.Error += error => Dispatcher.UIThread.Post(() => _connectionDetail.Text = error.Message);
 
         PropertyChanged += (_, e) =>
@@ -94,6 +97,7 @@ internal sealed class MainWindow : Window
         };
         Closed += (_, _) =>
         {
+            ClearPendingSnapshots();
             _sceneBootstrapTimer.Stop();
             _hierarchyPanel.Shutdown();
             _inspectorPanel.Shutdown();
@@ -171,6 +175,69 @@ internal sealed class MainWindow : Window
         Background = new SolidColorBrush(Color.FromArgb(28, 255, 255, 255))
     };
 
+    private void QueueSnapshotForUi(SceneSnapshot snapshot)
+    {
+        var schedule = false;
+        lock (_snapshotDispatchLock)
+        {
+            // Snapshot delivery is state replacement, not an event history. When a large
+            // hierarchy makes the Avalonia UI slower than the Agent, keep only the newest
+            // state instead of building an unbounded Dispatcher backlog.
+            _pendingSnapshot = snapshot;
+            if (!_snapshotDispatchScheduled)
+            {
+                _snapshotDispatchScheduled = true;
+                schedule = true;
+            }
+        }
+
+        if (schedule)
+        {
+            Dispatcher.UIThread.Post(ApplyLatestSnapshot);
+        }
+    }
+
+    private void ApplyLatestSnapshot()
+    {
+        SceneSnapshot? snapshot;
+        lock (_snapshotDispatchLock)
+        {
+            snapshot = _pendingSnapshot;
+            _pendingSnapshot = null;
+        }
+
+        if (snapshot is not null)
+        {
+            ApplySnapshot(snapshot);
+        }
+
+        var reschedule = false;
+        lock (_snapshotDispatchLock)
+        {
+            if (_pendingSnapshot is not null)
+            {
+                reschedule = true;
+            }
+            else
+            {
+                _snapshotDispatchScheduled = false;
+            }
+        }
+
+        if (reschedule)
+        {
+            Dispatcher.UIThread.Post(ApplyLatestSnapshot);
+        }
+    }
+
+    private void ClearPendingSnapshots()
+    {
+        lock (_snapshotDispatchLock)
+        {
+            _pendingSnapshot = null;
+        }
+    }
+
     private void OnHierarchySelectionChanged(int instanceId, GameObjectInfo? gameObject)
     {
         SendCommand(ViewerCommandCodec.EncodeSelectObject(instanceId));
@@ -213,6 +280,7 @@ internal sealed class MainWindow : Window
                 break;
 
             default:
+                ClearPendingSnapshots();
                 _connectionStatus.Text = Localization.T("main.disconnected");
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = Localization.T("main.waitAgent");
