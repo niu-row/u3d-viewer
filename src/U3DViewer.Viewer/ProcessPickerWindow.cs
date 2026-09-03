@@ -18,7 +18,11 @@ internal sealed class ProcessPickerWindow : Window
     private readonly Button _openGameButton;
     private readonly Button _refreshButton;
     private readonly TextBlock _summary;
+    private readonly ProgressBar _progressBar;
     private readonly DispatcherTimer _refreshTimer = new();
+    private readonly DispatcherTimer _operationTimer = new();
+    private DateTime _operationStartedUtc;
+    private string _operationMessage = string.Empty;
     private bool _refreshing;
     private bool _operating;
 
@@ -70,17 +74,34 @@ internal sealed class ProcessPickerWindow : Window
             TextWrapping = TextWrapping.Wrap
         };
 
+        _progressBar = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Height = 7,
+            IsVisible = false,
+            Margin = new Thickness(0, 7, 14, 0)
+        };
+
         Content = BuildLayout();
 
         _refreshTimer.Interval = TimeSpan.FromSeconds(2);
         _refreshTimer.Tick += async (_, _) => await RefreshAsync();
+
+        _operationTimer.Interval = TimeSpan.FromMilliseconds(500);
+        _operationTimer.Tick += (_, _) => UpdateOperationElapsed();
 
         Opened += async (_, _) =>
         {
             await RefreshAsync();
             _refreshTimer.Start();
         };
-        Closed += (_, _) => _refreshTimer.Stop();
+        Closed += (_, _) =>
+        {
+            _refreshTimer.Stop();
+            _operationTimer.Stop();
+        };
     }
 
     private Control BuildLayout()
@@ -101,7 +122,7 @@ internal sealed class ProcessPickerWindow : Window
 
         var description = new TextBlock
         {
-            Text = "Choose a running Unity process or Open Game…. U3DViewer prepares BepInEx, builds the matching Agent from that game's Unity assemblies, deploys it, launches/restarts the game, and connects automatically.",
+            Text = "Choose a running Unity process or Open Game…. U3DViewer prepares BepInEx, builds or reuses the matching Agent, deploys it, launches/restarts the game, and connects automatically.",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
         };
@@ -128,17 +149,24 @@ internal sealed class ProcessPickerWindow : Window
         var footer = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
             Margin = new Thickness(0, 12, 0, 0)
         };
         footer.Children.Add(_summary);
 
+        Grid.SetRow(_progressBar, 1);
+        footer.Children.Add(_progressBar);
+
         Grid.SetColumn(_openGameButton, 1);
+        Grid.SetRowSpan(_openGameButton, 2);
         footer.Children.Add(_openGameButton);
 
         Grid.SetColumn(_refreshButton, 2);
+        Grid.SetRowSpan(_refreshButton, 2);
         footer.Children.Add(_refreshButton);
 
         Grid.SetColumn(_actionButton, 3);
+        Grid.SetRowSpan(_actionButton, 2);
         footer.Children.Add(_actionButton);
 
         Grid.SetRow(footer, 3);
@@ -349,8 +377,16 @@ internal sealed class ProcessPickerWindow : Window
         _openGameButton.IsEnabled = false;
         _refreshButton.IsEnabled = false;
         _list.IsEnabled = false;
+        _operationStartedUtc = DateTime.UtcNow;
+        _operationMessage = "Starting runtime preparation...";
+        _progressBar.IsVisible = true;
+        _progressBar.IsIndeterminate = false;
+        _progressBar.Value = 2;
+        _summary.Text = _operationMessage;
+        _operationTimer.Start();
 
-        var progress = new Progress<string>(message => _summary.Text = message);
+        string? terminalMessage = null;
+        var progress = new Progress<string>(UpdateAutomationProgress);
 
         try
         {
@@ -358,24 +394,33 @@ internal sealed class ProcessPickerWindow : Window
             var result = await action(cancellation.Token, progress);
             if (result.Success && result.Target is not null)
             {
-                _summary.Text = "Agent ready. Opening Viewer...";
+                _operationMessage = "Agent ready. Opening Viewer...";
+                _summary.Text = _operationMessage;
+                _progressBar.IsIndeterminate = false;
+                _progressBar.Value = 100;
                 _connect(result.Target);
                 return;
             }
 
-            _summary.Text = result.Message;
+            terminalMessage = result.Message;
+            _summary.Text = terminalMessage;
         }
         catch (OperationCanceledException)
         {
-            _summary.Text = "Operation timed out or was cancelled.";
+            terminalMessage = "Operation timed out or was cancelled.";
+            _summary.Text = terminalMessage;
         }
         catch (Exception ex)
         {
-            _summary.Text = $"Operation failed: {ex.Message}";
+            terminalMessage = $"Operation failed: {ex.Message}";
+            _summary.Text = terminalMessage;
         }
         finally
         {
+            _operationTimer.Stop();
             _operating = false;
+            _progressBar.IsIndeterminate = false;
+            _progressBar.IsVisible = false;
             _openGameButton.IsEnabled = true;
             _refreshButton.IsEnabled = true;
             _list.IsEnabled = true;
@@ -383,7 +428,58 @@ internal sealed class ProcessPickerWindow : Window
             {
                 _refreshTimer.Start();
                 await RefreshAsync();
+                if (!string.IsNullOrWhiteSpace(terminalMessage))
+                {
+                    _summary.Text = terminalMessage;
+                }
             }
         }
+    }
+
+    private void UpdateAutomationProgress(string message)
+    {
+        _operationMessage = message;
+        var state = ResolveProgressState(message);
+        _progressBar.IsVisible = true;
+        _progressBar.IsIndeterminate = state.Indeterminate;
+        if (!state.Indeterminate)
+        {
+            _progressBar.Value = Math.Max(_progressBar.Value, state.Value);
+        }
+
+        UpdateOperationElapsed();
+    }
+
+    private void UpdateOperationElapsed()
+    {
+        if (!_operating || string.IsNullOrWhiteSpace(_operationMessage))
+        {
+            return;
+        }
+
+        var elapsed = DateTime.UtcNow - _operationStartedUtc;
+        _summary.Text = $"{_operationMessage}  ·  {elapsed:mm\:ss}";
+    }
+
+    private static (double Value, bool Indeterminate) ResolveProgressState(string message)
+    {
+        if (message.Contains("Closing", StringComparison.OrdinalIgnoreCase)) return (5, false);
+        if (message.Contains("Preparing Unity", StringComparison.OrdinalIgnoreCase)) return (10, false);
+        if (message.Contains("Downloading BepInEx", StringComparison.OrdinalIgnoreCase)) return (15, true);
+        if (message.Contains("Installing BepInEx", StringComparison.OrdinalIgnoreCase)) return (22, false);
+        if (message.Contains("Starting the game once", StringComparison.OrdinalIgnoreCase)) return (30, true);
+        if (message.Contains("interop assemblies generated", StringComparison.OrdinalIgnoreCase)) return (42, false);
+        if (message.Contains("Checking", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("cache", StringComparison.OrdinalIgnoreCase)) return (48, false);
+        if (message.Contains("Using cached", StringComparison.OrdinalIgnoreCase)) return (72, false);
+        if (message.Contains("build workspace", StringComparison.OrdinalIgnoreCase)) return (52, false);
+        if (message.Contains("Building", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("Agent", StringComparison.OrdinalIgnoreCase)) return (58, true);
+        if (message.Contains("Cached", StringComparison.OrdinalIgnoreCase)) return (72, false);
+        if (message.Contains("Deploying", StringComparison.OrdinalIgnoreCase)) return (82, false);
+        if (message.Contains("Launching game", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("waiting for U3DViewer Agent", StringComparison.OrdinalIgnoreCase)) return (92, true);
+        if (message.Contains("Agent ready", StringComparison.OrdinalIgnoreCase)) return (100, false);
+        return (Math.Max(2, 0), false);
     }
 }
