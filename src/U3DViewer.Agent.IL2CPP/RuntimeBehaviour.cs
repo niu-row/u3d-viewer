@@ -10,6 +10,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static SceneCameraController? _sceneCamera;
     private static float _nextSnapshotAt;
     private static long _sequence;
+    private static int _selectedInstanceId;
 
     public RuntimeBehaviour(IntPtr pointer) : base(pointer)
     {
@@ -22,6 +23,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sceneCamera = new SceneCameraController();
         _nextSnapshotAt = 0f;
         _sequence = 0;
+        _selectedInstanceId = 0;
     }
 
     internal static void Shutdown()
@@ -42,6 +44,13 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             try
             {
+                if (command.Kind == U3DViewer.Protocol.ViewerCommandKind.SelectObject)
+                {
+                    _selectedInstanceId = command.InstanceId;
+                    _nextSnapshotAt = 0f;
+                    continue;
+                }
+
                 _sceneCamera?.Apply(command);
             }
             catch (Exception ex)
@@ -61,7 +70,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
         try
         {
-            var snapshot = SceneScanner.Capture(++_sequence);
+            var snapshot = SceneScanner.Capture(++_sequence, _selectedInstanceId);
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
         }
