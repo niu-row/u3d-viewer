@@ -2,6 +2,7 @@ using System.Collections;
 using System.Diagnostics;
 using System.Reflection;
 using BepInEx.Unity.IL2CPP.Utils;
+using U3DViewer.Protocol;
 using UnityEngine;
 using UnityEngine.Rendering;
 
