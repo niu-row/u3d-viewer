@@ -147,6 +147,8 @@ The active Scene presentation path does not perform GPU-to-CPU staging readback.
 
 Open/close/present calls are serialized on one dedicated Viewer presenter thread. Interactive window sizing pauses presentation and recreates the presenter after the final size settles. The hot `Present` path does not call `ResizeBuffers`; DXGI may temporarily stretch the existing backbuffer while the HWND is changing size, then a fresh swap chain is opened at the final dimensions.
 
+The Agent reports the ABI version of the NativeBridge actually loaded inside the game process. If it does not match the Protocol ABI expected by the Viewer, Scene presentation is rejected with a clear redeploy/restart message instead of continuing into opaque DXGI failures.
+
 Hierarchy discovery is lazy: scene roots are loaded first and child branches are scanned only when expanded. Unity API work remains on the Unity main thread and is spread across frames with a small per-frame budget. Snapshot JSON serialization runs off the Unity main thread.
 
 ## Scene View controls
@@ -167,7 +169,7 @@ The current fly speed is shown in the Scene toolbar and updates immediately when
 
 The Scene toolbar also provides independent `Follow Position` and `Follow Rotation` toggles. When enabled, the Scene Camera copies only the selected transform component from the current `Camera.main` immediately before a Scene render. Enabling both follows the full main-camera transform while leaving FOV, projection, clipping planes, and culling under U3DViewer control. These toggles are persisted per game.
 
-The Agent can create the Scene Camera before the game's `Camera.main` is ready. After the first usable render target arrives, the Viewer automatically sends one camera reset so initial position/orientation is synchronized without requiring a manual Reset Camera click.
+The Agent can create the Scene Camera before the game's `Camera.main` is ready. As soon as the pipe connects, the Viewer starts a short bootstrap sequence that sends Reset Camera immediately and retries every 500 ms until a usable Scene target appears, for at most about 10 seconds. Once the target is ready the bootstrap stops, so normal Scene navigation is not repeatedly reset.
 
 The main Scene toolbar keeps only high-frequency controls. Lens, stream, resolution, and culling settings live in the separate Scene Settings window. Toolbar content wraps on narrow layouts instead of forcing one long horizontal row.
 
@@ -180,11 +182,15 @@ Auto viewport   enabled
 Manual fallback 1280 x 720
 ```
 
-With automatic viewport matching enabled, the Unity RenderTexture follows the actual Scene View width, height, and aspect ratio. Viewer resize events are debounced before recreating the shared texture. Disable automatic matching to use a fixed width/height from 64 to 4096.
+With automatic viewport matching enabled, the Unity RenderTexture follows the actual Scene View width, height, and aspect ratio. Viewer resize events are debounced before recreating the shared texture. Auto viewport reacts to real `SizeChanged` events rather than every snapshot, uses a small pixel tolerance, and the footer has a fixed height so status/error text cannot create a resize feedback loop. Disable automatic matching to use a fixed width/height from 64 to 4096.
 
 Scene settings are persisted per game in `<Game>/U3DViewer/Settings/scene.json`. The saved profile includes FOV, near/far clipping planes, orthographic size, idle/active FPS, automatic/manual resolution settings, culling mode/mask, and the two main-camera follow toggles.
 
 Changing Scene resolution recreates the Unity RenderTexture and D3D11 shared texture. The Agent immediately refreshes Scene target state after a stream change so the Viewer does not wait for the normal one-second snapshot cadence before opening the new shared texture.
+
+If the presenter loses the current shared-resource generation, its watchdog requests `camera.recover` at most once per second. Recovery rebuilds only the Scene RenderTexture/shared transport generation and schedules a fresh render; it does not reset Scene Camera position, rotation, lens, projection, or culling state.
+
+When the Viewer is minimized or the Scene panel is not visible, it sends `camera.visibility=0` and the Agent stops the extra Scene `Camera.Render()` work while preserving the last frame and the normal hierarchy/inspector connection. Restoring visibility sends `camera.visibility=1` and immediately resumes Scene rendering.
 
 Scene Camera culling is configurable independently of the game view. `All` renders all 32 Unity Layers, `Copy Main Camera` follows the current `Camera.main.cullingMask` at snapshot cadence, and `Manual` opens a 32-Layer checklist using the target game's Layer names. `Copy Main Camera` remains the default when no per-game profile exists.
 
@@ -218,7 +224,7 @@ The Agent also retains average/maximum timing counters internally. The Scene ren
 - resizable Hierarchy / Scene / Inspector workspace
 - Unity-style Scene fly camera controls
 - adjustable Perspective/Orthographic Scene lens with visible active projection state
-- automatic initial main-camera pose reset
+- connection-time initial main-camera pose bootstrap
 - independent follow-main-camera position / rotation toggles
 - automatic free-aspect Scene RenderTexture sizing or fixed manual resolution
 - adjustable Scene FPS
@@ -228,6 +234,9 @@ The Agent also retains average/maximum timing counters internally. The Scene ren
 - D3D11 Scene View transport through a named shared texture
 - GPU-native Viewer Scene presentation with no CPU readback
 - dedicated Scene presenter thread and resize recovery
+- transport-only Scene watchdog recovery without camera-pose reset
+- NativeBridge ABI/version mismatch detection
+- automatic Scene render pause while Viewer/Scene is hidden
 - GPU-side Y flip and aspect-preserving presentation
 - English / Simplified Chinese Viewer UI
 
@@ -237,7 +246,7 @@ The Agent also retains average/maximum timing counters internally. The Scene ren
 - Scene transport currently requires Direct3D 11
 - a new, uncached compatibility profile currently requires a local .NET SDK for Agent compilation
 - unusual/custom Unity launchers can require additional process discovery handling
-- the game still performs an extra Scene Camera render for the inspector view; use the adjustable FPS/resolution settings to balance load
+- while Scene View is visible, the game performs an extra Scene Camera render; use the adjustable FPS/resolution settings to balance load
 - Hierarchy/Inspector control data currently uses JSON over the named pipe; GPU Scene pixels remain on the D3D11 shared-texture path
 - picking, collider visualization and transform gizmos are not implemented yet
 - no GitHub Actions; validation is local/manual
