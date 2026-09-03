@@ -452,14 +452,16 @@ internal sealed class MainWindow : Window
 
     private void OnHierarchySelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (_hierarchy.SelectedItem is HierarchyNode node && node.GameObject is not null)
+        if (_hierarchy.SelectedItem is HierarchyNode node && node.GameObject is not null && node.InstanceId is int instanceId)
         {
             _selectedNode = node;
+            SendCameraCommand(ViewerCommandCodec.EncodeSelectObject(instanceId));
             RenderInspector(node.GameObject);
         }
         else
         {
             _selectedNode = null;
+            SendCameraCommand(ViewerCommandCodec.EncodeSelectObject(0));
             RenderEmptyInspector();
         }
     }
