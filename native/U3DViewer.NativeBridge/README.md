@@ -1,46 +1,83 @@
 # U3DViewer.NativeBridge
 
-Windows/D3D11 native bridge used by both sides of the standalone Scene View transport.
+Windows/D3D11 native bridge used by the standalone Scene View transport.
 
-## Current state
+## Current path
 
-M4 now has an end-to-end implementation path:
+The target Unity process owns the writer side:
 
 ```text
-Target Unity game
-  Scene Camera
-    -> RenderTexture (1280x720 ARGB32)
-    -> RenderTexture.GetNativeTexturePtr()
-    -> U3DViewer_SetSourceTexture(...)
-    -> Camera.Render()
-    -> GL.IssuePluginEvent(...)
-    -> ID3D11DeviceContext::CopyResource
-    -> named D3D11 shared Texture2D
-
-Standalone U3DViewer.exe
-    -> U3DViewer_OpenSharedTexture(name)
-    -> keyed-mutex synchronized CopyResource
-    -> CPU-readable staging Texture2D
-    -> Avalonia WriteableBitmap
-    -> Scene View
+Scene Camera
+  -> RenderTexture (configurable size, ARGB32)
+  -> RenderTexture.GetNativeTexturePtr()
+  -> U3DViewer_SetSourceTexture(...)
+  -> Camera.Render()
+  -> GL.IssuePluginEvent(...)
+  -> ID3D11DeviceContext::CopyResource
+  -> named D3D11 shared Texture2D
+  -> IDXGIKeyedMutex (writer key 0 -> 1)
 ```
 
-The first Viewer implementation deliberately performs a GPU-to-CPU staging readback. This is a validation path, not the final performance architecture. Once the transport is proven against real Unity games, the Viewer should move to direct GPU presentation/external-image interop.
+The standalone Viewer owns the presenter side:
 
-## Synchronization
+```text
+Avalonia NativeControlHost
+  -> Win32 child HWND
+  -> D3D11 device on the same DXGI adapter LUID
+  -> OpenSharedResourceByName
+  -> IDXGIKeyedMutex (reader key 1 -> 0)
+  -> ShaderResourceView
+  -> fullscreen triangle shader
+  -> GPU-side RenderTexture Y flip
+  -> aspect-preserving viewport / letterbox
+  -> DXGI swap chain
+  -> Present
+```
+
+There is no active GPU-to-CPU staging readback or `WriteableBitmap` Scene path. The legacy CPU reader API has been removed; `NativeBridge.cpp` now contains only the Unity-side shared-texture writer, while `ScenePresenter.cpp` contains the Viewer-side GPU presenter and native Scene input host.
+
+## Shared resource
 
 The shared texture uses:
 
 - `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`
 - `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX`
 - key `0` for the game-side writer
-- key `1` for the Viewer-side reader
+- key `1` for the Viewer-side presenter
 
-The resource is opened by name, so no process-local HANDLE value needs to be sent through the Named Pipe protocol.
+The resource is opened by name, so no process-local HANDLE value is sent over the control protocol. The writer keeps the named NT shared handle alive for the lifetime of the resource.
+
+Changing Scene resolution recreates the Unity RenderTexture and shared resource with a new generation name so the Viewer does not accidentally reuse an old D3D11 object.
+
+## Native responsibilities
+
+`src/NativeBridge.cpp`:
+
+- accepts the Unity RenderTexture native pointer;
+- creates the named shared D3D11 texture;
+- copies the rendered frame on Unity's render thread;
+- publishes source DXGI format and adapter LUID;
+- owns writer-side keyed-mutex synchronization.
+
+`src/ScenePresenter.cpp`:
+
+- creates the embedded Win32 Scene HWND;
+- selects the Viewer D3D11 device by source adapter LUID;
+- opens the named shared resource;
+- creates the SRV/shaders/swap chain;
+- presents without CPU readback;
+- receives Raw Input for Scene fly-camera controls;
+- reports presenter initialization stages and HRESULT diagnostics.
 
 ## Build
 
-Use a Visual Studio x64 developer shell:
+Use a Visual Studio x64 developer environment, or run the repository build script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
+```
+
+Direct CMake build:
 
 ```powershell
 cmake -S native/U3DViewer.NativeBridge -B build/native -A x64
@@ -53,36 +90,20 @@ Output:
 build/native/Release/U3DViewer.NativeBridge.dll
 ```
 
-## Deployment
-
-For the target Unity game, copy the x64 DLL next to the game executable so the Mono or IL2CPP Agent can resolve the P/Invoke:
-
-```text
-<Game>/Game.exe
-<Game>/U3DViewer.NativeBridge.dll
-```
-
-For the standalone Viewer, copy the same DLL next to the Viewer executable:
-
-```text
-<U3DViewer>/U3DViewer.Viewer.exe
-<U3DViewer>/U3DViewer.NativeBridge.dll
-```
-
-Both processes load the same DLL binary, but each process has independent native global state. The target process uses the writer exports; the Viewer process uses the reader exports.
+The normal Viewer build copies this DLL next to `U3DViewer.Viewer.exe`. Runtime preparation also deploys the same DLL next to the target game executable for Agent P/Invoke.
 
 ## Current constraints
 
-- Windows x64 only
-- Direct3D 11 only
-- 4-byte RGBA/BGRA render target formats only
-- fixed 1280x720 Scene Camera target for the first runtime validation
-- Viewer currently performs staging readback instead of direct GPU presentation
+- Windows x64
+- Direct3D 11
+- single-sample shared Scene texture
+- 4-byte RGBA/BGRA-style Scene formats currently expected by the presentation path
+- Viewer and game must be able to open the shared resource on the same DXGI adapter
 
-## Next hardening work
+## Hardening still worth testing
 
-1. Validate the pipeline against a real Mono game and a real IL2CPP game.
-2. Add render-target resize negotiation.
-3. Add frame statistics and recovery when the target recreates its graphics device.
-4. Replace staging readback with direct GPU presentation in the Viewer.
-5. Add picking/gizmos after the render path is stable.
+- graphics-device loss/recreation
+- keyed-mutex abandonment/recovery
+- broader hybrid-GPU/driver coverage
+- additional texture-format cases
+- future DX12/Vulkan transport backends after D3D11 is fully hardened
