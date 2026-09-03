@@ -716,11 +716,19 @@ float4 main(PSIn input) : SV_TARGET
             return S_FALSE;
         }
 
-        const UINT width = static_cast<UINT>(rawWidth);
-        const UINT height = static_cast<UINT>(rawHeight);
-        if (presenter.Width != width || presenter.Height != height || !presenter.RenderTargetView)
+        // Do not ResizeBuffers from the hot Present path while the Avalonia/Win32 child
+        // is being interactively resized. DXGI can stretch the existing backbuffer to the
+        // current HWND. NativeSceneHost pauses presentation during sizing and recreates the
+        // presenter once the final size settles, so the next swap chain starts at the final
+        // dimensions without a resize race.
+        const UINT width = std::max<UINT>(1, presenter.Width);
+        const UINT height = std::max<UINT>(1, presenter.Height);
+        if (!presenter.RenderTargetView)
         {
-            HRESULT hr = CreateRenderTarget(presenter, width, height);
+            HRESULT hr = CreateRenderTarget(
+                presenter,
+                static_cast<UINT>(rawWidth),
+                static_cast<UINT>(rawHeight));
             if (FAILED(hr))
             {
                 return hr;
