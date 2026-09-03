@@ -134,6 +134,7 @@ internal sealed class SceneCameraController : IDisposable
 
         _camera = _cameraObject.AddComponent<Camera>();
         _camera.enabled = false;
+        _camera.orthographic = false;
         _camera.nearClipPlane = 0.03f;
         _camera.farClipPlane = 10000f;
 
@@ -219,6 +220,7 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
+        camera.orthographic = false;
         var source = Camera.main;
         if (source is null || source == camera)
         {
@@ -229,8 +231,6 @@ internal sealed class SceneCameraController : IDisposable
 
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
-        camera.orthographic = source.orthographic;
-        camera.orthographicSize = source.orthographicSize;
         camera.fieldOfView = source.fieldOfView;
         camera.nearClipPlane = source.nearClipPlane;
         camera.farClipPlane = source.farClipPlane;
