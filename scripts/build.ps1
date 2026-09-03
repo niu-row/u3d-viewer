@@ -1,6 +1,5 @@
 param(
     [string]$ConfigPath = "u3dviewer.local.json",
-    [ValidateSet("Debug", "Release")]
     [string]$Configuration = ""
 )
 
@@ -48,12 +47,79 @@ function Invoke-External {
     }
 }
 
+function Test-ReferenceSet {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Directory,
+        [Parameter(Mandatory = $true)] [string[]] $Files
+    )
+
+    if (-not (Test-Path $Directory -PathType Container)) {
+        return $false
+    }
+
+    foreach ($file in $Files) {
+        if (-not (Test-Path (Join-Path $Directory $file) -PathType Leaf)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Sync-UnityReferences {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Backend,
+        [Parameter(Mandatory = $true)] [string] $GamePath,
+        [Parameter(Mandatory = $true)] [string] $AgentLib,
+        [Parameter(Mandatory = $true)] [string[]] $Files
+    )
+
+    if (Test-ReferenceSet -Directory $AgentLib -Files $Files) {
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($GamePath) -or -not (Test-Path $GamePath -PathType Container)) {
+        throw "Unity references are missing and gamePath is not valid. Set gamePath in u3dviewer.local.json."
+    }
+
+    $sourceDirectory = $null
+    if ($Backend -eq "IL2CPP") {
+        $candidate = Join-Path $GamePath "BepInEx/interop"
+        if (Test-ReferenceSet -Directory $candidate -Files $Files) {
+            $sourceDirectory = $candidate
+        } else {
+            throw "IL2CPP interop references were not found in '$candidate'. Run the game with BepInEx once, then build again."
+        }
+    } else {
+        $dataDirectories = Get-ChildItem -Path $GamePath -Directory -Filter "*_Data" -ErrorAction SilentlyContinue
+        foreach ($dataDirectory in $dataDirectories) {
+            $candidate = Join-Path $dataDirectory.FullName "Managed"
+            if (Test-ReferenceSet -Directory $candidate -Files $Files) {
+                $sourceDirectory = $candidate
+                break
+            }
+        }
+
+        if ($null -eq $sourceDirectory) {
+            throw "Mono Unity references were not found under '$GamePath/*_Data/Managed'."
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $AgentLib | Out-Null
+    foreach ($file in $Files) {
+        Copy-Item -Force (Join-Path $sourceDirectory $file) (Join-Path $AgentLib $file)
+    }
+
+    Write-Host "Staged Unity references from: $sourceDirectory" -ForegroundColor DarkCyan
+}
+
 if (-not (Test-Path $configFile)) {
-    throw "Missing $ConfigPath. Copy u3dviewer.local.json.example to u3dviewer.local.json and edit backend/gamePath first."
+    throw "Missing $ConfigPath. Run the VSCode task 'U3DViewer: Create Local Config', then edit backend/gamePath."
 }
 
 $config = Get-Content -Raw $configFile | ConvertFrom-Json
 $backend = (Get-ConfigValue -Config $config -Name "backend").Trim().ToUpperInvariant()
+$gamePath = Get-ConfigValue -Config $config -Name "gamePath"
 if ($backend -notin @("MONO", "IL2CPP")) {
     throw "backend must be either 'Mono' or 'IL2CPP' in $ConfigPath."
 }
@@ -77,28 +143,14 @@ $requiredUnityAssemblies = @(
     "UnityEngine.SceneManagementModule.dll"
 )
 
-$missingUnityAssemblies = @()
-foreach ($assembly in $requiredUnityAssemblies) {
-    if (-not (Test-Path (Join-Path $agentLib $assembly))) {
-        $missingUnityAssemblies += $assembly
-    }
-}
-
-if ($missingUnityAssemblies.Count -gt 0) {
-    $sourceHint = if ($backend -eq "MONO") {
-        "Copy them from <Game>_Data/Managed/."
-    } else {
-        "Run the IL2CPP game with BepInEx once, then copy them from <Game>/BepInEx/interop/."
-    }
-
-    throw "Missing Unity references in src/$agentFolder/lib/: $($missingUnityAssemblies -join ', '). $sourceHint"
-}
+Sync-UnityReferences -Backend $backend -GamePath $gamePath -AgentLib $agentLib -Files $requiredUnityAssemblies
 
 Push-Location $repoRoot
 try {
     Write-Host "U3DViewer local build" -ForegroundColor Green
     Write-Host "Backend:       $backend"
     Write-Host "Configuration: $Configuration"
+    Write-Host "Game:          $gamePath"
 
     Invoke-External "Configure NativeBridge (x64)" {
         & cmake -S $nativeSource -B $nativeBuild -A x64
@@ -123,7 +175,6 @@ try {
     Write-Host "Build completed." -ForegroundColor Green
     Write-Host "NativeBridge: $nativeDll"
     Write-Host "Viewer:       $viewerExe"
-    Write-Host "Run scripts/deploy.ps1 to copy the game-side files."
 }
 finally {
     Pop-Location
