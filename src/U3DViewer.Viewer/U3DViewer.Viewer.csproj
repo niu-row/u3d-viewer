@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>U3DViewer.Viewer</AssemblyName>
+    <RootNamespace>U3DViewer.Viewer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
+  </ItemGroup>
+</Project>
