@@ -16,6 +16,7 @@ internal sealed class MainWindow : Window
     private readonly HierarchyPanel _hierarchyPanel;
     private readonly InspectorPanel _inspectorPanel;
     private readonly ScenePanel _scenePanel;
+    private bool _initialSceneCameraResetSent;
 
     public MainWindow()
     {
@@ -128,6 +129,15 @@ internal sealed class MainWindow : Window
         _snapshotStatus.Text = Localization.Translate(
             $"Snapshot #{snapshot.Sequence} · {snapshot.Scenes.Length} scene(s)");
 
+        if (!_initialSceneCameraResetSent && snapshot.RenderTarget?.Available == true)
+        {
+            // The Agent can create its Scene Camera before the game's Camera.main is ready.
+            // Reset once after the first usable target arrives so the initial pose is copied
+            // at a more reliable point in the game's startup sequence. ScenePanel then
+            // reapplies any per-game persisted lens/stream/culling settings afterwards.
+            _initialSceneCameraResetSent = _connection.TrySendCommand(ViewerCommandCodec.EncodeCameraReset());
+        }
+
         _hierarchyPanel.ApplyScenes(snapshot.Scenes);
         _inspectorPanel.Show(_hierarchyPanel.SelectedGameObject);
         _scenePanel.ApplySnapshot(snapshot.RenderTarget, snapshot.Performance);
@@ -153,6 +163,7 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Text = Localization.T("main.disconnected");
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = Localization.T("main.waitAgent");
+                _initialSceneCameraResetSent = false;
                 _hierarchyPanel.ResetConnectionState();
                 _scenePanel.SetDisconnected();
                 break;
