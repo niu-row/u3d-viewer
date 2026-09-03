@@ -16,7 +16,6 @@ namespace U3DViewer.Agent.IL2CPP;
 internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 {
     private const float MinCaptureFps = 1f;
-    private const int MaxFreeBootstrapFlushAttempts = 4;
 
     private static readonly BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
     private static readonly BindingFlags StaticPrivate = BindingFlags.Static | BindingFlags.NonPublic;
@@ -51,8 +50,6 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         typeof(SceneCameraController).GetField("_renderEvent", InstancePrivate);
     private static readonly FieldInfo? FreeCopyEventIdField =
         typeof(SceneCameraController).GetField("_copyEventId", InstancePrivate);
-    private static readonly FieldInfo? FreeSharedNameField =
-        typeof(SceneCameraController).GetField("_sharedName", InstancePrivate);
     private static readonly FieldInfo? FreeNextRenderAtField =
         typeof(SceneCameraController).GetField("_nextRenderAt", InstancePrivate);
     private static readonly FieldInfo? FreeInteractiveUntilField =
@@ -72,8 +69,6 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
     private static bool _screenCaptureResolved;
 
     private RenderTexture? _screenCaptureStaging;
-    private string _lastFreeSharedName = string.Empty;
-    private int _freeBootstrapFlushAttempts;
 
     public SourceCaptureEndOfFrameFallback(IntPtr pointer) : base(pointer)
     {
@@ -212,10 +207,10 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         }
     }
 
-    private void TryPublishFreeSceneCameraFrame()
+    private static void TryPublishFreeSceneCameraFrame()
     {
         var controller = SceneCameraField?.GetValue(null) as SceneCameraController;
-        if (controller is null || !SceneTransportCoordinator.IsOwner(SceneTransportOwner.FreeCamera))
+        if (controller is null)
         {
             return;
         }
@@ -234,16 +229,9 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         var copyEventId = FreeCopyEventIdField?.GetValue(controller) is int eventId
             ? eventId
             : 0;
-        var sharedName = FreeSharedNameField?.GetValue(controller) as string ?? string.Empty;
-        if (renderEvent == IntPtr.Zero || string.IsNullOrWhiteSpace(sharedName))
+        if (renderEvent == IntPtr.Zero)
         {
             return;
-        }
-
-        if (!string.Equals(_lastFreeSharedName, sharedName, StringComparison.Ordinal))
-        {
-            _lastFreeSharedName = sharedName;
-            _freeBootstrapFlushAttempts = 0;
         }
 
         var now = Time.unscaledTime;
@@ -270,29 +258,9 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         var started = Stopwatch.GetTimestamp();
         try
         {
-            // A bare GL.IssuePluginEvent at WaitForEndOfFrame is not reliably submitted by
-            // some Unity 2020 SRPs. Queue an actual GPU operation that reads the completed
-            // free-camera target first, then enqueue the NativeBridge copy event behind it.
-            // The staging texture is only a render-thread submission anchor; NativeBridge
-            // continues to copy from camera.targetTexture itself.
-            var staging = EnsureScreenCaptureStaging(camera.targetTexture.width, camera.targetTexture.height);
-            Graphics.Blit(camera.targetTexture, staging);
+            // The active SRP has already rendered the enabled U3DViewer Camera into its
+            // targetTexture during this frame. Publish that completed RenderTexture now.
             GL.IssuePluginEvent(renderEvent, copyEventId);
-
-            var writerReady = false;
-            try
-            {
-                writerReady = NativeBridge.U3DViewer_IsSceneWriterReady(sharedName) != 0;
-            }
-            catch
-            {
-            }
-
-            if (!writerReady && _freeBootstrapFlushAttempts < MaxFreeBootstrapFlushAttempts)
-            {
-                _freeBootstrapFlushAttempts++;
-                GL.Flush();
-            }
 
             var elapsedMs =
                 (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
@@ -303,10 +271,7 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
             var pipelineName = pipeline?.GetType().FullName ?? pipeline?.GetType().Name ?? "unknown SRP";
             FreeRenderStatusField?.SetValue(
                 controller,
-                writerReady
-                    ? $"SRP free Scene Camera is rendered by {pipelineName}; NativeBridge writer is live."
-                    : $"SRP free Scene Camera publication queued through render-thread anchor; pipeline {pipelineName}; bootstrap flush {_freeBootstrapFlushAttempts}/{MaxFreeBootstrapFlushAttempts}."
-            );
+                $"SRP free Scene Camera is rendered by {pipelineName}; shared frame published at end-of-frame.");
         }
         catch (Exception ex)
         {
