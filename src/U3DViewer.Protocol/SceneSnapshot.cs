@@ -35,6 +35,8 @@ public sealed class RenderTargetInfo
 
 public sealed class PerformanceInfo
 {
+    public double GameFps { get; set; }
+    public double SceneFps { get; set; }
     public int HierarchyNodes { get; set; }
     public double HierarchyScanMs { get; set; }
     public double HierarchyScanAverageMs { get; set; }
