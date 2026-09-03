@@ -12,18 +12,21 @@ The project is split into a game-side runtime agent and a standalone viewer:
 
 ## Current milestone
 
-M2 desktop UI is now in progress on top of the M0/M1 runtime hierarchy pipeline.
+M2 desktop UI is implemented and M3 Scene Camera control is now being wired on top of the M0/M1 runtime hierarchy pipeline.
 
-Implemented in the standalone viewer:
+Implemented:
 
 - automatic Named Pipe connection/reconnection to either Mono or IL2CPP agent
 - live Runtime Hierarchy tree
 - selection that survives ordinary snapshot refreshes
 - read-only Runtime Inspector for GameObject state, Transform and component type names
+- bidirectional Named Pipe control channel
+- isolated runtime Scene Camera controller in both Mono and IL2CPP agents
+- camera reset, perspective/orthographic switch, focus selected, keyboard move/look commands
 - connection and snapshot status
-- reserved Scene View panel for the upcoming runtime camera/render transport
+- reserved Scene View panel for the upcoming render transport
 
-The 3D Scene View is **not implemented yet**. M3 adds the isolated runtime Scene Camera and bidirectional camera command protocol; M4 adds D3D11 shared-texture transport.
+The camera currently remains disabled for rendering. M4 will attach a render target and transport it to the standalone Viewer with a D3D11 shared resource.
 
 ## Scope
 

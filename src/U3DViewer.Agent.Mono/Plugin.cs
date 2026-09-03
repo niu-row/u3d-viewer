@@ -12,6 +12,7 @@ public sealed class Plugin : BaseUnityPlugin
     public const string PluginVersion = "0.1.0";
 
     private PipeServer? _pipeServer;
+    private SceneCameraController? _sceneCamera;
     private float _nextSnapshotAt;
     private long _sequence;
 
@@ -19,6 +20,7 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Awake()
     {
+        _sceneCamera = new SceneCameraController();
         _pipeServer = new PipeServer("u3d-viewer", LogSource);
         _pipeServer.Start();
         LogSource.LogInfo("U3D Viewer Mono agent loaded.");
@@ -26,7 +28,25 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Update()
     {
-        if (_pipeServer is null || UnityEngine.Time.unscaledTime < _nextSnapshotAt)
+        var pipeServer = _pipeServer;
+        if (pipeServer is null)
+        {
+            return;
+        }
+
+        while (pipeServer.TryDequeueCommand(out var command))
+        {
+            try
+            {
+                _sceneCamera?.Apply(command);
+            }
+            catch (Exception ex)
+            {
+                LogSource.LogWarning($"Failed to apply viewer command {command.Kind}: {ex.Message}");
+            }
+        }
+
+        if (UnityEngine.Time.unscaledTime < _nextSnapshotAt)
         {
             return;
         }
@@ -36,7 +56,7 @@ public sealed class Plugin : BaseUnityPlugin
         try
         {
             var snapshot = SceneScanner.Capture(++_sequence);
-            _pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
+            pipeServer.Publish(JsonSnapshotWriter.Write(snapshot));
         }
         catch (Exception ex)
         {
@@ -46,6 +66,8 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        _sceneCamera?.Dispose();
+        _sceneCamera = null;
         _pipeServer?.Dispose();
         _pipeServer = null;
     }

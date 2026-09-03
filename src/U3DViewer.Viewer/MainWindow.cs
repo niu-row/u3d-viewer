@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -156,11 +157,11 @@ internal sealed class MainWindow : Window
         };
     }
 
-    private static Control BuildScenePanel()
+    private Control BuildScenePanel()
     {
         var panel = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,*")
+            RowDefinitions = new RowDefinitions("Auto,Auto,*")
         };
 
         panel.Children.Add(new TextBlock
@@ -171,29 +172,53 @@ internal sealed class MainWindow : Window
             Margin = new Thickness(10, 10, 10, 8)
         });
 
-        var placeholder = new StackPanel
+        var toolbar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            Margin = new Thickness(10, 0, 10, 8)
+        };
+        toolbar.Children.Add(CreateCommandButton("Reset Camera", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraReset())));
+        toolbar.Children.Add(CreateCommandButton("Perspective", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraProjection(false))));
+        toolbar.Children.Add(CreateCommandButton("Orthographic", () => SendCameraCommand(ViewerCommandCodec.EncodeCameraProjection(true))));
+        toolbar.Children.Add(CreateCommandButton("Focus Selected", FocusSelected));
+        Grid.SetRow(toolbar, 1);
+        panel.Children.Add(toolbar);
+
+        var help = new StackPanel
         {
             Spacing = 8,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 460
+            MaxWidth = 520
         };
-        placeholder.Children.Add(new TextBlock
+        help.Children.Add(new TextBlock
         {
-            Text = "3D Scene transport is not connected yet",
+            Text = "Runtime Scene Camera control channel",
             FontSize = 18,
             FontWeight = FontWeight.SemiBold,
             HorizontalAlignment = HorizontalAlignment.Center
         });
-        placeholder.Children.Add(new TextBlock
+        help.Children.Add(new TextBlock
         {
-            Text = "M3 will add the runtime Scene Camera and camera command protocol. M4 will display its D3D11 shared render target here.",
+            Text = "Click this area to focus it. Use W/S to move forward/back, A/D to strafe, Q/E to move down/up, and arrow keys to look around. The camera exists inside the target game; M4 will stream its D3D11 render target into this panel.",
             TextWrapping = TextWrapping.Wrap,
             TextAlignment = TextAlignment.Center
         });
 
-        Grid.SetRow(placeholder, 1);
-        panel.Children.Add(placeholder);
+        var inputSurface = new Border
+        {
+            Focusable = true,
+            Margin = new Thickness(10),
+            BorderBrush = Brushes.Gray,
+            BorderThickness = new Thickness(1),
+            Child = help
+        };
+        inputSurface.PointerPressed += (_, _) => inputSurface.Focus();
+        inputSurface.KeyDown += OnSceneKeyDown;
+        Grid.SetRow(inputSurface, 2);
+        panel.Children.Add(inputSurface);
+
         return panel;
     }
 
@@ -227,11 +252,62 @@ internal sealed class MainWindow : Window
         };
     }
 
+    private static Button CreateCommandButton(string text, Action action)
+    {
+        var button = new Button { Content = text };
+        button.Click += (_, _) => action();
+        return button;
+    }
+
     private static Control BuildHierarchyHeader(HierarchyNode node, INameScope _)
     {
         var text = new TextBlock();
         text.Bind(TextBlock.TextProperty, new Binding(nameof(HierarchyNode.Label)));
         return text;
+    }
+
+    private void OnSceneKeyDown(object? sender, KeyEventArgs e)
+    {
+        string? command = e.Key switch
+        {
+            Key.W => ViewerCommandCodec.EncodeCameraMove(1f, 0f, 0f, 0.05f),
+            Key.S => ViewerCommandCodec.EncodeCameraMove(-1f, 0f, 0f, 0.05f),
+            Key.A => ViewerCommandCodec.EncodeCameraMove(0f, -1f, 0f, 0.05f),
+            Key.D => ViewerCommandCodec.EncodeCameraMove(0f, 1f, 0f, 0.05f),
+            Key.Q => ViewerCommandCodec.EncodeCameraMove(0f, 0f, -1f, 0.05f),
+            Key.E => ViewerCommandCodec.EncodeCameraMove(0f, 0f, 1f, 0.05f),
+            Key.Left => ViewerCommandCodec.EncodeCameraLook(-4f, 0f),
+            Key.Right => ViewerCommandCodec.EncodeCameraLook(4f, 0f),
+            Key.Up => ViewerCommandCodec.EncodeCameraLook(0f, -4f),
+            Key.Down => ViewerCommandCodec.EncodeCameraLook(0f, 4f),
+            _ => null
+        };
+
+        if (command is not null)
+        {
+            SendCameraCommand(command);
+            e.Handled = true;
+        }
+    }
+
+    private void FocusSelected()
+    {
+        if (_selectedNode?.InstanceId is int instanceId)
+        {
+            SendCameraCommand(ViewerCommandCodec.EncodeCameraFocus(instanceId));
+        }
+        else
+        {
+            _connectionDetail.Text = "Select a runtime GameObject before using Focus Selected.";
+        }
+    }
+
+    private void SendCameraCommand(string command)
+    {
+        if (!_connection.TrySendCommand(command))
+        {
+            _connectionDetail.Text = "Camera command not sent: viewer is not connected to an agent.";
+        }
     }
 
     private void UpdateConnectionState(ConnectionState state)
@@ -246,7 +322,7 @@ internal sealed class MainWindow : Window
             case ConnectionState.Connected:
                 _connectionStatus.Text = "● Connected";
                 _connectionStatus.Foreground = Brushes.Green;
-                _connectionDetail.Text = "Receiving live runtime hierarchy";
+                _connectionDetail.Text = "Receiving hierarchy; Scene Camera commands are available";
                 break;
             default:
                 _connectionStatus.Text = "● Disconnected";

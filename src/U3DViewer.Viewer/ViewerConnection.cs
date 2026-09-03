@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 using U3DViewer.Protocol;
 
@@ -18,9 +19,11 @@ internal sealed class ViewerConnection : IAsyncDisposable
     {
         PropertyNameCaseInsensitive = true
     };
+    private readonly object _writerGate = new();
 
     private Task? _runTask;
     private ConnectionState _state = ConnectionState.Disconnected;
+    private StreamWriter? _writer;
 
     public event Action<ConnectionState>? StateChanged;
     public event Action<SceneSnapshot>? SnapshotReceived;
@@ -36,6 +39,28 @@ internal sealed class ViewerConnection : IAsyncDisposable
         _runTask = Task.Run(() => RunAsync(_shutdown.Token));
     }
 
+    public bool TrySendCommand(string command)
+    {
+        lock (_writerGate)
+        {
+            if (_writer is null)
+            {
+                return false;
+            }
+
+            try
+            {
+                _writer.WriteLine(command);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Error?.Invoke(ex);
+                return false;
+            }
+        }
+    }
+
     private async Task RunAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -47,13 +72,24 @@ internal sealed class ViewerConnection : IAsyncDisposable
                 await using var pipe = new NamedPipeClientStream(
                     ".",
                     "u3d-viewer",
-                    PipeDirection.In,
+                    PipeDirection.InOut,
                     PipeOptions.Asynchronous);
 
                 await pipe.ConnectAsync(1000, cancellationToken);
+
+                using var reader = new StreamReader(pipe, Encoding.UTF8, true, 16 * 1024, leaveOpen: true);
+                using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
+                {
+                    AutoFlush = true
+                };
+
+                lock (_writerGate)
+                {
+                    _writer = writer;
+                }
+
                 SetState(ConnectionState.Connected);
 
-                using var reader = new StreamReader(pipe);
                 while (!cancellationToken.IsCancellationRequested && pipe.IsConnected)
                 {
                     var line = await reader.ReadLineAsync(cancellationToken);
@@ -94,6 +130,10 @@ internal sealed class ViewerConnection : IAsyncDisposable
             }
             finally
             {
+                lock (_writerGate)
+                {
+                    _writer = null;
+                }
                 SetState(ConnectionState.Disconnected);
             }
 
