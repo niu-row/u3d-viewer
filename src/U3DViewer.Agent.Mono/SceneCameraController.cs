@@ -92,6 +92,9 @@ internal sealed class SceneCameraController : IDisposable
             case ViewerCommandKind.CameraStreamSettings:
                 ApplyStreamSettings(command.X, command.Y, (int)command.Z, (int)command.Value);
                 break;
+            case ViewerCommandKind.CameraCullingMask:
+                BoostInteractiveRender();
+                break;
             case ViewerCommandKind.CameraReset:
                 CopyFromGameCamera();
                 BoostInteractiveRender();
