@@ -111,7 +111,7 @@ internal static class GameAutomation
         }
 
         progress?.Report("Launching game and waiting for U3DViewer Agent...");
-        return await StartAndWaitAsync(executablePath, cancellationToken);
+        return await StartAndWaitAsync(executablePath, progress, cancellationToken);
     }
 
     private static GameAutomationResult Deploy(
@@ -202,9 +202,11 @@ internal static class GameAutomation
 
     private static async Task<GameAutomationResult> StartAndWaitAsync(
         string executablePath,
+        IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
         var gameDirectory = Path.GetDirectoryName(executablePath)!;
+        var bepinexLogPath = Path.Combine(gameDirectory, "BepInEx", "LogOutput.log");
         Process? process;
 
         try
@@ -226,6 +228,8 @@ internal static class GameAutomation
             return new GameAutomationResult(false, "Windows did not return a process for the launched game.");
         }
 
+        progress?.Report($"Game process started (PID {process.Id}). Waiting for Agent pipe. BepInEx log: {bepinexLogPath}");
+
         using (process)
         {
             var deadline = DateTime.UtcNow + AgentStartupTimeout;
@@ -244,7 +248,9 @@ internal static class GameAutomation
 
                 if (process.HasExited && target is null)
                 {
-                    return new GameAutomationResult(false, $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}). Check BepInEx/LogOutput.log.");
+                    return new GameAutomationResult(
+                        false,
+                        $"Game exited before the U3DViewer Agent became ready (exit code {process.ExitCode}). BepInEx log: {bepinexLogPath}");
                 }
 
                 await Task.Delay(500, cancellationToken);
@@ -252,7 +258,7 @@ internal static class GameAutomation
 
             return new GameAutomationResult(
                 false,
-                "Game started, but the Agent did not become ready within 60 seconds. Check BepInEx/LogOutput.log for plugin load errors.");
+                $"Game started, but the Agent did not become ready within 60 seconds. BepInEx log: {bepinexLogPath}");
         }
     }
 }
