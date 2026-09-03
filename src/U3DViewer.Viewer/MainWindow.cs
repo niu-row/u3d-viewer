@@ -4,7 +4,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
-using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -18,6 +17,7 @@ internal sealed class MainWindow : Window
 {
     private readonly ViewerConnection _connection = new();
     private readonly NativeSceneTextureReader _sceneReader = new();
+    private readonly SceneFramePump _sceneFramePump;
     private readonly DispatcherTimer _sceneTimer = new();
     private readonly ObservableCollection<HierarchyNode> _rootNodes = new();
     private readonly TreeView _hierarchy;
@@ -28,13 +28,17 @@ internal sealed class MainWindow : Window
     private readonly Image _sceneImage;
     private readonly TextBlock _sceneStatus;
 
+    private SceneInputController? _sceneInputController;
     private HierarchyNode? _selectedNode;
     private WriteableBitmap? _sceneBitmap;
     private int _sceneDxgiFormat;
     private string _sceneGpuStatus = string.Empty;
+    private string _sceneTransportKey = string.Empty;
 
     public MainWindow()
     {
+        _sceneFramePump = new SceneFramePump(_sceneReader);
+
         Title = "U3D Viewer";
         Width = 1400;
         Height = 850;
@@ -93,11 +97,11 @@ internal sealed class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 760,
+            MaxWidth = 840,
             Margin = new Thickness(14)
         };
 
-        _sceneTimer.Interval = TimeSpan.FromMilliseconds(33);
+        _sceneTimer.Interval = TimeSpan.FromMilliseconds(16);
         _sceneTimer.Tick += (_, _) => RefreshSceneFrame();
 
         Content = BuildLayout();
@@ -115,6 +119,9 @@ internal sealed class MainWindow : Window
         Closed += (_, _) =>
         {
             _sceneTimer.Stop();
+            _sceneInputController?.Dispose();
+            _sceneInputController = null;
+            _sceneFramePump.Dispose();
             _sceneReader.Dispose();
             _sceneBitmap?.Dispose();
             _sceneBitmap = null;
@@ -249,8 +256,7 @@ internal sealed class MainWindow : Window
             Background = Brushes.Black,
             Child = sceneSurface
         };
-        inputSurface.PointerPressed += (_, _) => inputSurface.Focus();
-        inputSurface.KeyDown += OnSceneKeyDown;
+        _sceneInputController = new SceneInputController(inputSurface, SendCameraCommand, FocusSelected);
         Grid.SetRow(inputSurface, 2);
         panel.Children.Add(inputSurface);
 
@@ -301,30 +307,6 @@ internal sealed class MainWindow : Window
         return text;
     }
 
-    private void OnSceneKeyDown(object? sender, KeyEventArgs e)
-    {
-        string? command = e.Key switch
-        {
-            Key.W => ViewerCommandCodec.EncodeCameraMove(1f, 0f, 0f, 0.05f),
-            Key.S => ViewerCommandCodec.EncodeCameraMove(-1f, 0f, 0f, 0.05f),
-            Key.A => ViewerCommandCodec.EncodeCameraMove(0f, -1f, 0f, 0.05f),
-            Key.D => ViewerCommandCodec.EncodeCameraMove(0f, 1f, 0f, 0.05f),
-            Key.Q => ViewerCommandCodec.EncodeCameraMove(0f, 0f, -1f, 0.05f),
-            Key.E => ViewerCommandCodec.EncodeCameraMove(0f, 0f, 1f, 0.05f),
-            Key.Left => ViewerCommandCodec.EncodeCameraLook(-4f, 0f),
-            Key.Right => ViewerCommandCodec.EncodeCameraLook(4f, 0f),
-            Key.Up => ViewerCommandCodec.EncodeCameraLook(0f, -4f),
-            Key.Down => ViewerCommandCodec.EncodeCameraLook(0f, 4f),
-            _ => null
-        };
-
-        if (command is not null)
-        {
-            SendCameraCommand(command);
-            e.Handled = true;
-        }
-    }
-
     private void FocusSelected()
     {
         if (_selectedNode?.InstanceId is int instanceId)
@@ -363,7 +345,7 @@ internal sealed class MainWindow : Window
                 _connectionStatus.Text = "● Disconnected";
                 _connectionStatus.Foreground = Brushes.Gray;
                 _connectionDetail.Text = "Waiting for a U3DViewer Agent (Mono or IL2CPP)";
-                _sceneReader.Reset();
+                StopSceneTransport();
                 _sceneGpuStatus = string.Empty;
                 _sceneStatus.Text = "Waiting for the target game's Scene render target...";
                 break;
@@ -386,16 +368,31 @@ internal sealed class MainWindow : Window
     {
         if (target is null || !target.Available)
         {
+            StopSceneTransport();
             _sceneGpuStatus = string.Empty;
             _sceneStatus.Text = target?.Status ?? "Agent did not publish Scene render target information.";
             return;
         }
 
+        var transportKey = $"{target.SharedName}|{target.AdapterLuid:X16}|{target.Width}x{target.Height}|{target.DxgiFormat}";
+        if (!string.Equals(_sceneTransportKey, transportKey, StringComparison.Ordinal))
+        {
+            StopSceneTransport();
+        }
+
         if (!_sceneReader.Open(target))
         {
+            _sceneFramePump.Stop();
+            _sceneTransportKey = string.Empty;
             _sceneGpuStatus = string.Empty;
             _sceneStatus.Text = _sceneReader.LastStatus;
             return;
+        }
+
+        if (!string.Equals(_sceneTransportKey, transportKey, StringComparison.Ordinal))
+        {
+            _sceneTransportKey = transportKey;
+            _sceneFramePump.Start(target.Width, target.Height);
         }
 
         _sceneGpuStatus = _sceneReader.DescribeGpuPair(target);
@@ -422,9 +419,7 @@ internal sealed class MainWindow : Window
             _sceneImage.Source = _sceneBitmap;
         }
 
-        _sceneStatus.Text =
-            $"{target.Width}×{target.Height} · DXGI {target.DxgiFormat} · click Scene View, then use WASD/QE + arrow keys\n" +
-            _sceneGpuStatus;
+        _sceneStatus.Text = BuildSceneStatus($"{target.Width}×{target.Height} · DXGI {target.DxgiFormat}");
     }
 
     private void RefreshSceneFrame()
@@ -438,7 +433,7 @@ internal sealed class MainWindow : Window
         try
         {
             using var framebuffer = bitmap.Lock();
-            if (_sceneReader.TryRead(
+            if (_sceneFramePump.TryCopyLatest(
                     framebuffer.Address,
                     framebuffer.RowBytes,
                     framebuffer.Size.Height,
@@ -447,9 +442,7 @@ internal sealed class MainWindow : Window
                     out var dxgiFormat))
             {
                 _sceneImage.IsVisible = true;
-                _sceneStatus.Text =
-                    $"LIVE · {width}×{height} · DXGI {dxgiFormat} · WASD/QE + arrow keys\n" +
-                    _sceneGpuStatus;
+                _sceneStatus.Text = BuildSceneStatus($"LIVE · {width}×{height} · DXGI {dxgiFormat}");
                 _sceneImage.InvalidateVisual();
             }
         }
@@ -458,6 +451,17 @@ internal sealed class MainWindow : Window
             _sceneStatus.Text = $"Scene frame update failed: {ex.Message}\n{_sceneGpuStatus}";
             ViewerLog.Error("Scene frame update failed.", ex);
         }
+    }
+
+    private string BuildSceneStatus(string prefix) =>
+        $"{prefix} · RMB + mouse look · RMB + WASD/QE fly · Shift boost · wheel speed · F focus\n" +
+        _sceneGpuStatus;
+
+    private void StopSceneTransport()
+    {
+        _sceneFramePump.Stop();
+        _sceneReader.Reset();
+        _sceneTransportKey = string.Empty;
     }
 
     private void SyncScenes(IReadOnlyList<SceneInfo> scenes)
