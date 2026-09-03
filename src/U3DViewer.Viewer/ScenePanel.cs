@@ -21,6 +21,8 @@ internal sealed class ScenePanel : Grid
     private readonly TextBlock _performanceStatus;
     private readonly TextBlock _moveSpeedStatus;
     private readonly Button _settingsButton;
+    private readonly CheckBox _followPositionBox;
+    private readonly CheckBox _followRotationBox;
     private readonly DispatcherTimer _resizeDebounce = new();
     private readonly string _gameExecutablePath;
 
@@ -28,6 +30,9 @@ internal sealed class ScenePanel : Grid
     private SceneSettingsProfile? _savedProfile;
     private bool _savedProfileApplied;
     private bool _autoViewport = true;
+    private bool _followPosition;
+    private bool _followRotation;
+    private bool _updatingFollowControls;
     private Size _pendingViewportSize;
     private int _requestedAutoWidth;
     private int _requestedAutoHeight;
@@ -47,6 +52,8 @@ internal sealed class ScenePanel : Grid
             ? null
             : SceneSettingsStore.Load(_gameExecutablePath);
         _autoViewport = _savedProfile?.AutoViewport ?? true;
+        _followPosition = _savedProfile?.FollowMainCameraPosition ?? false;
+        _followRotation = _savedProfile?.FollowMainCameraRotation ?? false;
 
         RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto");
 
@@ -66,6 +73,21 @@ internal sealed class ScenePanel : Grid
         };
 
         _settingsButton = CreateCommandButton(SettingsLabel(), ShowSettings);
+        _followPositionBox = new CheckBox
+        {
+            Content = FollowPositionLabel(),
+            IsChecked = _followPosition,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        _followRotationBox = new CheckBox
+        {
+            Content = FollowRotationLabel(),
+            IsChecked = _followRotation,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _followPositionBox.IsCheckedChanged += (_, _) => OnFollowChanged();
+        _followRotationBox.IsCheckedChanged += (_, _) => OnFollowChanged();
 
         var commands = new StackPanel
         {
@@ -83,6 +105,8 @@ internal sealed class ScenePanel : Grid
             () => _sendCommand(ViewerCommandCodec.EncodeCameraProjection(true))));
         commands.Children.Add(CreateCommandButton(Localization.T("main.focusSelected"), FocusSelected));
         commands.Children.Add(_settingsButton);
+        commands.Children.Add(_followPositionBox);
+        commands.Children.Add(_followRotationBox);
 
         var toolbar = new Grid
         {
@@ -206,9 +230,28 @@ internal sealed class ScenePanel : Grid
     private void OnLanguageChanged()
     {
         _settingsButton.Content = SettingsLabel();
+        _followPositionBox.Content = FollowPositionLabel();
+        _followRotationBox.Content = FollowRotationLabel();
         if (_latestTarget is not null)
         {
             _moveSpeedStatus.Text = Localization.Translate($"Speed {_latestTarget.MoveSpeed:0.##} u/s");
+        }
+    }
+
+    private void OnFollowChanged()
+    {
+        if (_updatingFollowControls)
+        {
+            return;
+        }
+
+        _followPosition = _followPositionBox.IsChecked == true;
+        _followRotation = _followRotationBox.IsChecked == true;
+        SaveFollowSettings();
+
+        if (_latestTarget is not null)
+        {
+            _sendCommand(ViewerCommandCodec.EncodeCameraFollowTransform(_followPosition, _followRotation));
         }
     }
 
@@ -250,7 +293,9 @@ internal sealed class ScenePanel : Grid
             Width = values.Width,
             Height = values.Height,
             CullingMode = values.CullingMode,
-            CullingMask = values.CullingMask
+            CullingMask = values.CullingMask,
+            FollowMainCameraPosition = _followPosition,
+            FollowMainCameraRotation = _followRotation
         };
 
         _savedProfile = profile;
@@ -268,6 +313,10 @@ internal sealed class ScenePanel : Grid
 
     private void ApplyProfile(SceneSettingsProfile profile, RenderTargetInfo target)
     {
+        _followPosition = profile.FollowMainCameraPosition;
+        _followRotation = profile.FollowMainCameraRotation;
+        UpdateFollowControls();
+
         _sendCommand(ViewerCommandCodec.EncodeCameraLens(
             profile.FieldOfView,
             profile.NearClip,
@@ -304,6 +353,56 @@ internal sealed class ScenePanel : Grid
 
         var mask = profile.CullingMode == SceneCullingMode.Manual ? profile.CullingMask : -1;
         _sendCommand(ViewerCommandCodec.EncodeCameraCulling(profile.CullingMode, mask));
+        _sendCommand(ViewerCommandCodec.EncodeCameraFollowTransform(_followPosition, _followRotation));
+    }
+
+    private void SaveFollowSettings()
+    {
+        if (string.IsNullOrWhiteSpace(_gameExecutablePath))
+        {
+            return;
+        }
+
+        var profile = _savedProfile ?? CreateProfileFromCurrentState();
+        profile.FollowMainCameraPosition = _followPosition;
+        profile.FollowMainCameraRotation = _followRotation;
+        _savedProfile = profile;
+        SceneSettingsStore.Save(_gameExecutablePath, profile);
+    }
+
+    private SceneSettingsProfile CreateProfileFromCurrentState()
+    {
+        var target = _latestTarget;
+        return new SceneSettingsProfile
+        {
+            FieldOfView = target?.FieldOfView ?? 60f,
+            NearClip = target?.NearClipPlane ?? 0.001f,
+            FarClip = target?.FarClipPlane ?? 10000f,
+            OrthographicSize = target?.OrthographicSize ?? 5f,
+            IdleFps = target?.IdleFps ?? 15f,
+            InteractiveFps = target?.InteractiveFps ?? 30f,
+            AutoViewport = _autoViewport,
+            Width = target?.Width ?? 1280,
+            Height = target?.Height ?? 720,
+            CullingMode = target?.CullingMode ?? SceneCullingMode.MainCamera,
+            CullingMask = target?.CullingMask ?? -1,
+            FollowMainCameraPosition = _followPosition,
+            FollowMainCameraRotation = _followRotation
+        };
+    }
+
+    private void UpdateFollowControls()
+    {
+        _updatingFollowControls = true;
+        try
+        {
+            _followPositionBox.IsChecked = _followPosition;
+            _followRotationBox.IsChecked = _followRotation;
+        }
+        finally
+        {
+            _updatingFollowControls = false;
+        }
     }
 
     private void ScheduleViewportResize(Size size)
@@ -369,6 +468,8 @@ internal sealed class ScenePanel : Grid
     }
 
     private static string SettingsLabel() => Localization.IsChinese ? "设置…" : "Settings…";
+    private static string FollowPositionLabel() => Localization.IsChinese ? "跟随位置" : "Follow Position";
+    private static string FollowRotationLabel() => Localization.IsChinese ? "跟随朝向" : "Follow Rotation";
 
     private static Button CreateCommandButton(string text, Action action)
     {
