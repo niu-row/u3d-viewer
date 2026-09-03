@@ -5,7 +5,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Threading;
 using Avalonia.VisualTree;
 
 namespace U3DViewer.Viewer;
@@ -27,6 +26,8 @@ internal static class Localization
 {
     private const string English = "en-US";
     private const string ChineseSimplified = "zh-CN";
+
+    internal const string SkipAutoTranslateClass = "u3d-localization-skip";
 
     private static readonly ConditionalWeakTable<Window, object> AttachedWindows = new();
     private static readonly string SettingsPath = Path.Combine(
@@ -97,6 +98,20 @@ internal static class Localization
             ["main.loading"] = ("Loading...", "加载中…"),
             ["main.transform"] = ("Transform", "变换"),
             ["main.none"] = ("<none>", "<无>"),
+            ["main.cullingMask"] = ("Culling Mask", "剔除遮罩"),
+            ["main.layers"] = ("Layers…", "图层…"),
+            ["main.mask"] = ("Mask", "遮罩"),
+            ["main.cullingAll"] = ("All", "所有"),
+            ["main.cullingMainCamera"] = ("Copy Main Camera", "复制主相机"),
+            ["main.cullingManual"] = ("Manual", "手动"),
+            ["main.manualCullingTitle"] = ("Manual Culling Mask", "手动剔除遮罩"),
+            ["main.everything"] = ("Everything", "全部"),
+            ["main.nothing"] = ("Nothing", "全不选"),
+            ["main.cancel"] = ("Cancel", "取消"),
+            ["main.applyManualMask"] = ("Apply Manual Mask", "应用手动遮罩"),
+            ["main.cullingDescription"] = (
+                "Choose the Unity Layers rendered by the Scene Camera.",
+                "选择场景相机要渲染的 Unity Layer。"),
             ["scene.hostFailed"] = ("Could not create the native D3D11 Scene host window.", "无法创建原生 D3D11 场景宿主窗口。"),
             ["scene.bridgeMissing"] = ("U3DViewer.NativeBridge.dll was not found next to U3DViewer.Viewer.exe.", "U3DViewer.Viewer.exe 旁未找到 U3DViewer.NativeBridge.dll。")
         };
@@ -130,6 +145,25 @@ internal static class Localization
             ? IsChinese ? pair.Zh : pair.En
             : key;
 
+    public static string Translate(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+        {
+            return input;
+        }
+
+        foreach (var pair in Text.Values)
+        {
+            if (string.Equals(input, pair.En, StringComparison.Ordinal) ||
+                string.Equals(input, pair.Zh, StringComparison.Ordinal))
+            {
+                return IsChinese ? pair.Zh : pair.En;
+            }
+        }
+
+        return IsChinese ? TranslateDynamicToChinese(input) : TranslateDynamicToEnglish(input);
+    }
+
     public static void Attach(Window window)
     {
         if (window.Content is not Control originalContent || AttachedWindows.TryGetValue(window, out _))
@@ -146,13 +180,11 @@ internal static class Localization
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
         };
-
         var label = new TextBlock
         {
             Text = T("language"),
             VerticalAlignment = VerticalAlignment.Center
         };
-
         var bar = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -162,10 +194,7 @@ internal static class Localization
             Children = { label, selector }
         };
 
-        var wrapper = new Grid
-        {
-            RowDefinitions = new RowDefinitions("Auto,*")
-        };
+        var wrapper = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         wrapper.Children.Add(new Border
         {
             BorderBrush = Brushes.Gray,
@@ -195,20 +224,7 @@ internal static class Localization
         }
 
         LanguageChanged += RefreshLanguage;
-
-        var timer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(250)
-        };
-        timer.Tick += (_, _) => Apply(window);
-        timer.Start();
-
-        window.Closed += (_, _) =>
-        {
-            timer.Stop();
-            LanguageChanged -= RefreshLanguage;
-        };
-
+        window.Closed += (_, _) => LanguageChanged -= RefreshLanguage;
         RefreshLanguage();
     }
 
@@ -218,10 +234,12 @@ internal static class Localization
 
         foreach (var block in window.GetVisualDescendants().OfType<TextBlock>())
         {
-            if (!string.IsNullOrEmpty(block.Text))
+            if (block.Classes.Contains(SkipAutoTranslateClass) || string.IsNullOrEmpty(block.Text))
             {
-                block.Text = Translate(block.Text);
+                continue;
             }
+
+            block.Text = Translate(block.Text);
         }
 
         foreach (var button in window.GetVisualDescendants().OfType<Button>())
@@ -231,25 +249,6 @@ internal static class Localization
                 button.Content = Translate(text);
             }
         }
-    }
-
-    private static string Translate(string input)
-    {
-        if (string.IsNullOrEmpty(input))
-        {
-            return input;
-        }
-
-        foreach (var pair in Text.Values)
-        {
-            if (string.Equals(input, pair.En, StringComparison.Ordinal) ||
-                string.Equals(input, pair.Zh, StringComparison.Ordinal))
-            {
-                return IsChinese ? pair.Zh : pair.En;
-            }
-        }
-
-        return IsChinese ? TranslateDynamicToChinese(input) : TranslateDynamicToEnglish(input);
     }
 
     private static string TranslateDynamicToChinese(string input)
