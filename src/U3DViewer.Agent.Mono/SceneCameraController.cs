@@ -12,6 +12,11 @@ internal sealed class SceneCameraController : IDisposable
     private const float IdleRenderInterval = 1f / 15f;
     private const float InteractiveRenderInterval = 1f / 30f;
     private const float InteractiveHoldSeconds = 0.2f;
+    private const float DefaultPerspectiveFov = 60f;
+    private const float MinPerspectiveNear = 0.03f;
+    private const float MinPerspectiveFov = 5f;
+    private const float MaxPerspectiveFov = 120f;
+    private const float DefaultPerspectiveFar = 10000f;
 
     private GameObject? _cameraObject;
     private Camera? _camera;
@@ -26,6 +31,8 @@ internal sealed class SceneCameraController : IDisposable
     private ulong _adapterLuid;
     private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
+    private string _sourceProjectionInfo = "Source Camera: unavailable";
+    private float _preferredOrthographicSize = 5f;
     private string _renderStatus = "Scene Camera has not initialized yet.";
 
     public void Apply(ViewerCommand command)
@@ -60,7 +67,7 @@ internal sealed class SceneCameraController : IDisposable
                 _moveSpeed = Mathf.Clamp(command.Value, 0.1f, 1000f);
                 break;
             case ViewerCommandKind.CameraProjection:
-                camera.orthographic = command.Flag;
+                ApplyProjection(camera, command.Flag);
                 BoostInteractiveRender();
                 break;
             case ViewerCommandKind.CameraReset:
@@ -109,6 +116,13 @@ internal sealed class SceneCameraController : IDisposable
     public RenderTargetInfo GetRenderTargetInfo()
     {
         EnsureCamera();
+        var camera = _camera;
+        var projection = camera is null
+            ? "Scene Camera unavailable"
+            : camera.orthographic
+                ? $"Scene Orthographic size={camera.orthographicSize:0.###}, near={camera.nearClipPlane:0.###}, far={camera.farClipPlane:0.###}"
+                : $"Scene Perspective FOV={camera.fieldOfView:0.###}, near={camera.nearClipPlane:0.###}, far={camera.farClipPlane:0.###}";
+
         return new RenderTargetInfo
         {
             Available = _bridgeReady,
@@ -118,7 +132,7 @@ internal sealed class SceneCameraController : IDisposable
             DxgiFormat = _dxgiFormat,
             AdapterLuid = _adapterLuid,
             AdapterName = _adapterName,
-            Status = _renderStatus
+            Status = $"{_renderStatus} {_sourceProjectionInfo} -> {projection}."
         };
     }
 
@@ -135,8 +149,9 @@ internal sealed class SceneCameraController : IDisposable
         _camera = _cameraObject.AddComponent<Camera>();
         _camera.enabled = false;
         _camera.orthographic = false;
-        _camera.nearClipPlane = 0.03f;
-        _camera.farClipPlane = 10000f;
+        _camera.nearClipPlane = MinPerspectiveNear;
+        _camera.farClipPlane = DefaultPerspectiveFar;
+        _camera.fieldOfView = DefaultPerspectiveFov;
 
         _renderTexture = new RenderTexture(RenderWidth, RenderHeight, 24, RenderTextureFormat.ARGB32)
         {
@@ -220,24 +235,80 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
-        camera.orthographic = false;
         var source = Camera.main;
         if (source is null || source == camera)
         {
+            _sourceProjectionInfo = "Source Camera: unavailable";
+            _preferredOrthographicSize = 5f;
             camera.transform.position = new Vector3(0f, 2f, -5f);
             camera.transform.rotation = Quaternion.identity;
+            camera.cullingMask = -1;
+            camera.fieldOfView = DefaultPerspectiveFov;
+            camera.nearClipPlane = MinPerspectiveNear;
+            camera.farClipPlane = DefaultPerspectiveFar;
+            camera.orthographicSize = _preferredOrthographicSize;
+            camera.orthographic = false;
             return;
         }
 
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
-        camera.fieldOfView = source.fieldOfView;
-        camera.nearClipPlane = source.nearClipPlane;
-        camera.farClipPlane = source.farClipPlane;
         camera.clearFlags = source.clearFlags;
         camera.backgroundColor = source.backgroundColor;
         camera.cullingMask = source.cullingMask;
+
+        _preferredOrthographicSize = Mathf.Max(0.01f, source.orthographicSize);
+        camera.orthographicSize = _preferredOrthographicSize;
+
+        if (source.orthographic)
+        {
+            camera.fieldOfView = DefaultPerspectiveFov;
+            camera.nearClipPlane = MinPerspectiveNear;
+            camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
+            _sourceProjectionInfo =
+                $"Source {source.name} Orthographic size={source.orthographicSize:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+        }
+        else
+        {
+            camera.fieldOfView = SanitizeFov(source.fieldOfView);
+            camera.nearClipPlane = SanitizeNear(source.nearClipPlane);
+            camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
+            _sourceProjectionInfo =
+                $"Source {source.name} Perspective FOV={source.fieldOfView:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+        }
+
+        camera.orthographic = false;
     }
+
+    private void ApplyProjection(Camera camera, bool orthographic)
+    {
+        if (orthographic)
+        {
+            camera.orthographicSize = Mathf.Max(0.01f, _preferredOrthographicSize);
+            camera.orthographic = true;
+            return;
+        }
+
+        camera.fieldOfView = SanitizeFov(camera.fieldOfView);
+        camera.nearClipPlane = SanitizeNear(camera.nearClipPlane);
+        camera.farClipPlane = SanitizeFar(camera.farClipPlane, camera.nearClipPlane);
+        camera.orthographic = false;
+    }
+
+    private static float SanitizeNear(float value) =>
+        float.IsNaN(value) || float.IsInfinity(value) || value < MinPerspectiveNear
+            ? MinPerspectiveNear
+            : value;
+
+    private static float SanitizeFar(float value, float near) =>
+        float.IsNaN(value) || float.IsInfinity(value) || value <= near + 1f
+            ? DefaultPerspectiveFar
+            : Mathf.Max(value, near + 1f);
+
+    private static float SanitizeFov(float value) =>
+        float.IsNaN(value) || float.IsInfinity(value)
+            ? DefaultPerspectiveFov
+            : Mathf.Clamp(value, MinPerspectiveFov, MaxPerspectiveFov);
 
     private void Focus(Vector3 target)
     {
