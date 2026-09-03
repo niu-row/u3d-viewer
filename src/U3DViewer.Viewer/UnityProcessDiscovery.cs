@@ -57,7 +57,10 @@ internal static class UnityProcessDiscovery
                 var unityPlayer = Path.Combine(directory, "UnityPlayer.dll");
                 var globalGameManagers = Path.Combine(dataDirectory, "globalgamemanagers");
 
-                if (!File.Exists(unityPlayer) && !File.Exists(globalGameManagers))
+                // Requiring the executable-specific _Data directory avoids false positives
+                // such as UnityCrashHandler64.exe living beside UnityPlayer.dll.
+                if (!Directory.Exists(dataDirectory) ||
+                    (!File.Exists(unityPlayer) && !File.Exists(globalGameManagers)))
                 {
                     continue;
                 }
@@ -100,6 +103,7 @@ internal static class UnityProcessDiscovery
         }
 
         if (Directory.Exists(Path.Combine(gameDirectory, "MonoBleedingEdge")) ||
+            Directory.Exists(Path.Combine(gameDirectory, "Mono")) ||
             File.Exists(Path.Combine(dataDirectory, "Managed", "Assembly-CSharp.dll")))
         {
             return "Mono";
