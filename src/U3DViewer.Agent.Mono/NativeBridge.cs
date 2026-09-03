@@ -19,6 +19,9 @@ internal static class NativeBridge
     internal static extern int U3DViewer_GetCopyEventId();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int U3DViewer_IsSceneWriterReady();
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int U3DViewer_GetSourceDxgiFormat();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
