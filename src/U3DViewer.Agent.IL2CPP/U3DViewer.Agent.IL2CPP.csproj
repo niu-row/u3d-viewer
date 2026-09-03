@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>U3DViewer.Agent.IL2CPP</AssemblyName>
+    <RootNamespace>U3DViewer.Agent.IL2CPP</RootNamespace>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.785" />
+    <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
+  </ItemGroup>
+
+  <!--
+    Run the target IL2CPP game with BepInEx once, then copy the generated
+    interop assemblies from BepInEx/interop into ./lib.
+  -->
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>lib\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.SceneManagementModule">
+      <HintPath>lib\UnityEngine.SceneManagementModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
