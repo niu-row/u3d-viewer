@@ -100,23 +100,46 @@ internal sealed class MainWindow : Window
             Child = statusBar
         });
 
+        var columns = new ColumnDefinitions("280,5,*,5,340");
+        columns[0].MinWidth = 180;
+        columns[2].MinWidth = 360;
+        columns[4].MinWidth = 220;
+
         var workspace = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("300,*,360")
+            ColumnDefinitions = columns
         };
         Grid.SetRow(workspace, 1);
 
         workspace.Children.Add(_hierarchyPanel);
 
-        Grid.SetColumn(_scenePanel, 1);
+        var leftSplitter = CreateSplitter();
+        Grid.SetColumn(leftSplitter, 1);
+        workspace.Children.Add(leftSplitter);
+
+        Grid.SetColumn(_scenePanel, 2);
         workspace.Children.Add(_scenePanel);
 
-        Grid.SetColumn(_inspectorPanel, 2);
+        var rightSplitter = CreateSplitter();
+        Grid.SetColumn(rightSplitter, 3);
+        workspace.Children.Add(rightSplitter);
+
+        Grid.SetColumn(_inspectorPanel, 4);
         workspace.Children.Add(_inspectorPanel);
 
         root.Children.Add(workspace);
         return root;
     }
+
+    private static GridSplitter CreateSplitter() => new()
+    {
+        Width = 5,
+        HorizontalAlignment = HorizontalAlignment.Stretch,
+        VerticalAlignment = VerticalAlignment.Stretch,
+        ResizeDirection = GridResizeDirection.Columns,
+        ResizeBehavior = GridResizeBehavior.PreviousAndNext,
+        Background = new SolidColorBrush(Color.FromArgb(28, 255, 255, 255))
+    };
 
     private void OnHierarchySelectionChanged(int instanceId, GameObjectInfo? gameObject)
     {
