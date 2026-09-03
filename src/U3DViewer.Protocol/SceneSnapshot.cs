@@ -7,7 +7,7 @@ public sealed class SceneSnapshot
     public long UnixTimeMs { get; set; }
     public RenderTargetInfo? RenderTarget { get; set; }
     public PerformanceInfo Performance { get; set; } = new();
-    public SceneInfo[] Scenes { get; set; } = Array.Empty<SceneInfo>();
+    public SceneInfo[] Scenes { get; set; } = new SceneInfo[0];
 }
 
 public sealed class RenderTargetInfo
@@ -30,7 +30,7 @@ public sealed class RenderTargetInfo
     public float InteractiveFps { get; set; }
     public SceneCullingMode CullingMode { get; set; } = SceneCullingMode.MainCamera;
     public int CullingMask { get; set; } = -1;
-    public string[] LayerNames { get; set; } = Array.Empty<string>();
+    public string[] LayerNames { get; set; } = new string[0];
     public string Status { get; set; } = string.Empty;
 }
 
@@ -54,7 +54,7 @@ public sealed class SceneInfo
     public int BuildIndex { get; set; }
     public string Name { get; set; } = string.Empty;
     public bool IsLoaded { get; set; }
-    public GameObjectInfo[] Roots { get; set; } = Array.Empty<GameObjectInfo>();
+    public GameObjectInfo[] Roots { get; set; } = new GameObjectInfo[0];
 }
 
 public sealed class GameObjectInfo
@@ -67,8 +67,8 @@ public sealed class GameObjectInfo
     public int Layer { get; set; }
     public string Tag { get; set; } = string.Empty;
     public TransformInfo Transform { get; set; } = new();
-    public string[] Components { get; set; } = Array.Empty<string>();
-    public GameObjectInfo[] Children { get; set; } = Array.Empty<GameObjectInfo>();
+    public string[] Components { get; set; } = new string[0];
+    public GameObjectInfo[] Children { get; set; } = new GameObjectInfo[0];
 }
 
 public sealed class TransformInfo
