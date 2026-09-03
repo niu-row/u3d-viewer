@@ -47,6 +47,23 @@ function Invoke-External {
     }
 }
 
+function Resolve-CMake {
+    $command = Get-Command cmake -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $editions = @("Community", "Professional", "Enterprise", "BuildTools")
+    foreach ($edition in $editions) {
+        $candidate = Join-Path $env:ProgramFiles "Microsoft Visual Studio/2022/$edition/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+        if (Test-Path $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    throw "cmake.exe was not found. Install the Visual Studio 2022 'Desktop development with C++' workload with CMake tools."
+}
+
 function Test-ReferenceSet {
     param(
         [Parameter(Mandatory = $true)] [string] $Directory,
@@ -131,6 +148,7 @@ if ($Configuration -notin @("Debug", "Release")) {
     throw "configuration must be Debug or Release."
 }
 
+$cmake = Resolve-CMake
 $agentFolder = if ($backend -eq "MONO") { "U3DViewer.Agent.Mono" } else { "U3DViewer.Agent.IL2CPP" }
 $agentProject = Join-Path $repoRoot "src/$agentFolder/$agentFolder.csproj"
 $agentLib = Join-Path $repoRoot "src/$agentFolder/lib"
@@ -153,11 +171,11 @@ try {
     Write-Host "Game:          $gamePath"
 
     Invoke-External "Configure NativeBridge (x64)" {
-        & cmake -S $nativeSource -B $nativeBuild -A x64
+        & $cmake -S $nativeSource -B $nativeBuild -A x64
     }
 
     Invoke-External "Build NativeBridge" {
-        & cmake --build $nativeBuild --config $Configuration --parallel
+        & $cmake --build $nativeBuild --config $Configuration --parallel
     }
 
     Invoke-External "Build $agentFolder" {
