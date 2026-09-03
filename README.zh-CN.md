@@ -149,7 +149,9 @@ U3DViewer.Viewer.exe
 
 当前 Scene 显示路径不会进行 GPU -> CPU staging readback。Viewer 根据相同的 DXGI adapter LUID 打开命名共享纹理，通过 D3D11 shader 直接采样，在 GPU 上完成 Unity RenderTexture 的 Y 翻转，然后直接显示到嵌入式 HWND swap chain。
 
-Presenter 的 Open / Close / Present 现在全部串行运行在一条专用 Viewer 线程上。交互式拖动窗口尺寸时会暂停 presenter，尺寸稳定后按最终大小重新创建；`Present` 热路径不再调用 `ResizeBuffers`。拖动过程中 DXGI 可以暂时把旧 backbuffer 拉伸到当前 HWND，停止调整后再以最终尺寸打开新的 swap chain，避免 resize 时序和 DXGI 相互竞争。
+Presenter 的 Open / Close / Present 全部串行运行在一条专用 Viewer 线程上。交互式拖动窗口尺寸时会暂停 presenter，尺寸稳定后按最终大小重新创建；`Present` 热路径不调用 `ResizeBuffers`。拖动过程中 DXGI 可以暂时把旧 backbuffer 拉伸到当前 HWND，停止调整后再以最终尺寸打开新的 swap chain，避免 resize 时序和 DXGI 相互竞争。
+
+Agent 会回报游戏进程实际加载的 NativeBridge ABI 版本。若它和 Viewer/Protocol 期望的 ABI 不一致，Viewer 会直接拒绝 Scene presenter，并明确提示重新部署与重启游戏，而不是继续进入难以判断的 DXGI 错误。
 
 Hierarchy 使用按需展开策略：首次只加载 Scene roots，只有用户展开的分支才继续读取 children。Unity API 访问仍全部发生在 Unity 主线程，并使用较小的逐帧预算分散扫描成本；snapshot JSON 序列化放在 Unity 主线程之外执行。
 
@@ -165,11 +167,11 @@ Shift             临时加速
 F                 聚焦选中的 GameObject
 ```
 
-当前飞行速度会直接显示在 Scene 工具栏中，滚轮改变速度后会立即更新数值。透视 / 正交现在是互斥状态控件，会跟随 Agent 返回的实际投影模式高亮。
+当前飞行速度会直接显示在 Scene 工具栏中，滚轮改变速度后会立即更新数值。透视 / 正交是互斥状态控件，会跟随 Agent 返回的实际投影模式高亮。
 
 Scene 工具栏还提供两个独立开关：`跟随位置` 和 `跟随朝向`。开启后，Scene Camera 在真正渲染一帧之前，只同步所勾选的 `Camera.main` Transform 分量；两个都开启就是完整跟随主相机 Transform，但 FOV、投影、Near/Far 和 Culling 仍由 U3DViewer 自己控制。这两个开关按游戏持久化。
 
-Agent 有可能在游戏 `Camera.main` 尚未准备好时创建 Scene Camera。Viewer 收到第一个可用 Scene render target 后会自动发送一次 Reset Camera，因此首次打开时通常不再需要手动点一次“重置相机”。
+Agent 有可能在游戏 `Camera.main` 尚未准备好时创建 Scene Camera。现在 Viewer 在 pipe 连接成功后立即开始一个短暂 bootstrap：先发送一次 Reset Camera，若 Scene target 还未可用则每 500 ms 重试一次，最多约 10 秒；第一个可用 Scene target 出现后立即停止，因此不会在正常观察过程中反复重置视角。
 
 Scene 主工具栏只保留高频操作。FOV、Near/Far、Orthographic Size、Idle/Active FPS、分辨率方式和 Culling Mask 都放在独立的“场景设置”窗口里。窄窗口下工具栏会自动换行，不再强制挤成一整条横排。
 
@@ -182,7 +184,7 @@ Active FPS      30
 手动尺寸回退     1280 x 720
 ```
 
-自动匹配视口开启时，Unity RenderTexture 会跟随 Scene View 实际宽度、高度和比例。拖动窗口时会做防抖，停止调整后才重建共享纹理；关闭自动匹配后可以使用 64-4096 的固定宽高。
+自动匹配视口开启时，Unity RenderTexture 会跟随 Scene View 实际宽度、高度和比例。拖动窗口时会做防抖，停止调整后才重建共享纹理。Auto Viewport 只响应真实 `SizeChanged`，并带有少量像素容差；底部状态区固定高度且单行截断，因此错误文本不会再改变 Scene Host 高度并形成 resize 反馈环。关闭自动匹配后可以使用 64-4096 的固定宽高。
 
 场景设置会按游戏持久化到：
 
@@ -194,9 +196,13 @@ Active FPS      30
 
 修改 Scene 分辨率时会重新创建 Unity RenderTexture 和 D3D11 shared texture。Agent 在 `camera.stream` 修改后会立即刷新一次 Scene target 状态，因此 Viewer 不需要再等待正常约 1 秒的 snapshot 周期才能打开新的共享纹理。
 
+如果 presenter 丢失当前 shared-resource generation，watchdog 最多每 1 秒请求一次 `camera.recover`。恢复动作只重建 Scene RenderTexture / shared transport generation 并安排新的 render/copy，不会修改当前 Scene Camera 的位置、朝向、FOV、投影、裁剪面或 Culling。
+
+Viewer 最小化或 Scene 面板不可见时，会发送 `camera.visibility=0`，Agent 停止额外的 Scene `Camera.Render()`，但保留最后一帧以及正常的 Hierarchy / Inspector 连接。重新可见时发送 `camera.visibility=1`，并立即恢复 Scene 渲染。
+
 Scene Camera 的 `cullingMask` 可以独立选择：`所有` 渲染全部 32 个 Unity Layer；`复制主相机` 按 snapshot 节奏跟随当前 `Camera.main.cullingMask`；`手动` 打开 32 Layer 勾选窗口，并显示游戏实际定义的 Layer 名称。没有游戏级保存配置时，默认仍然是 `复制主相机`。
 
-Hierarchy 和 Inspector 两侧栏现在可以通过 splitter 拖动宽度，中间 Scene View 自动占用剩余区域。
+Hierarchy 和 Inspector 两侧栏可以通过 splitter 拖动宽度，中间 Scene View 自动占用剩余区域。
 
 ## 性能指标
 
@@ -226,7 +232,7 @@ Agent 内部仍保留平均值和最大值统计。Scene Render 指标测量的�
 - 可拖动的 Hierarchy / Scene / Inspector 工作区
 - 类 Unity Scene View 的飞行相机控制
 - 可调 Perspective / Orthographic Scene 镜头，并显示当前投影状态
-- 首次可用 Scene target 后自动同步一次主相机姿态
+- 连接后的主相机姿态 bootstrap
 - 独立的主相机位置 / 朝向跟随开关
 - 自动自由比例 Scene RenderTexture 尺寸或固定手动分辨率
 - 可调 Scene FPS
@@ -236,6 +242,9 @@ Agent 内部仍保留平均值和最大值统计。Scene Render 指标测量的�
 - D3D11 命名共享纹理 Scene transport
 - Viewer Scene GPU 原生显示，无 CPU readback
 - 独立 Scene presenter 线程与 resize 恢复
+- 不重置相机姿态的 transport-only watchdog 恢复
+- NativeBridge ABI / 版本不匹配检测
+- Viewer / Scene 不可见时自动暂停额外 Scene render
 - GPU 侧 Y flip 和等比例显示
 - English / 简体中文 Viewer UI
 
@@ -245,7 +254,7 @@ Agent 内部仍保留平均值和最大值统计。Scene Render 指标测量的�
 - Scene transport 当前要求 Direct3D 11
 - 新的、未缓存的 compatibility profile 首次仍需要本机 .NET SDK 编译 Agent
 - 特殊/自定义 Unity launcher 可能需要额外进程发现适配
-- 游戏仍需要额外执行 Viewer Scene Camera 的渲染；可以通过 Scene FPS / 分辨率设置控制负载
+- Scene View 可见时，游戏仍需要额外执行 Viewer Scene Camera 的渲染；可以通过 Scene FPS / 分辨率设置控制负载
 - Hierarchy / Inspector 控制数据目前仍使用 Named Pipe + JSON；Scene 像素始终走 D3D11 shared texture
 - 尚未实现 picking、collider 可视化和 transform gizmo
 - 不使用 GitHub Actions；当前验证方式为本地手动验证
