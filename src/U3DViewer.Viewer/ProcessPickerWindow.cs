@@ -94,6 +94,7 @@ internal sealed class ProcessPickerWindow : Window
 
         Opened += async (_, _) =>
         {
+            ViewerLog.Info("Process picker opened. Scanning running Unity processes.");
             await RefreshAsync();
             _refreshTimer.Start();
         };
@@ -262,6 +263,7 @@ internal sealed class ProcessPickerWindow : Window
         catch (Exception ex)
         {
             _summary.Text = $"Process scan failed: {ex.Message}";
+            ViewerLog.Error("Process scan failed.", ex);
         }
         finally
         {
@@ -324,6 +326,7 @@ internal sealed class ProcessPickerWindow : Window
 
         if (selected.AgentStatus == AgentProcessStatus.Ready)
         {
+            ViewerLog.Info($"Attaching to existing Agent: {selected.ProcessName}, PID {selected.ProcessId}.");
             _refreshTimer.Stop();
             _connect(selected);
             return;
@@ -334,6 +337,7 @@ internal sealed class ProcessPickerWindow : Window
             return;
         }
 
+        ViewerLog.Info($"Preparing running game: {selected.ExecutablePath} ({selected.Backend}).");
         await RunAutomationAsync(
             (token, progress) => GameAutomation.InstallAndRestartAsync(selected, progress, token));
     }
@@ -364,6 +368,7 @@ internal sealed class ProcessPickerWindow : Window
             return;
         }
 
+        ViewerLog.Info($"Open Game selected: {executablePath}");
         await RunAutomationAsync(
             (token, progress) => GameAutomation.InstallLaunchAndWaitAsync(executablePath, progress, token));
     }
@@ -384,9 +389,14 @@ internal sealed class ProcessPickerWindow : Window
         _progressBar.Value = 2;
         _summary.Text = _operationMessage;
         _operationTimer.Start();
+        ViewerLog.Info(_operationMessage);
 
         string? terminalMessage = null;
-        var progress = new Progress<string>(UpdateAutomationProgress);
+        var progress = new Progress<string>(message =>
+        {
+            ViewerLog.Info(message);
+            UpdateAutomationProgress(message);
+        });
 
         try
         {
@@ -398,22 +408,26 @@ internal sealed class ProcessPickerWindow : Window
                 _summary.Text = _operationMessage;
                 _progressBar.IsIndeterminate = false;
                 _progressBar.Value = 100;
+                ViewerLog.Info(_operationMessage);
                 _connect(result.Target);
                 return;
             }
 
             terminalMessage = result.Message;
             _summary.Text = terminalMessage;
+            ViewerLog.Error($"Runtime preparation failed: {terminalMessage}");
         }
         catch (OperationCanceledException)
         {
             terminalMessage = "Operation timed out or was cancelled.";
             _summary.Text = terminalMessage;
+            ViewerLog.Warning(terminalMessage);
         }
         catch (Exception ex)
         {
             terminalMessage = $"Operation failed: {ex.Message}";
             _summary.Text = terminalMessage;
+            ViewerLog.Error("Runtime preparation threw an exception.", ex);
         }
         finally
         {
