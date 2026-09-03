@@ -9,6 +9,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private const float SnapshotRestartDelay = 1.0f;
     private const int HierarchyNodesPerFrame = 64;
     private const double HierarchyScanBudgetMilliseconds = 0.75;
+    private const int InteractiveHierarchyNodesPerFrame = 256;
+    private const double InteractiveHierarchyScanBudgetMilliseconds = 2.0;
 
     private static PipeServer? _pipeServer;
     private static ManualLogSource? _log;
@@ -19,6 +21,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static float _nextSnapshotAt;
     private static long _sequence;
     private static int _selectedInstanceId;
+    private static bool _interactiveHierarchyRefresh;
     private static bool _originalRunInBackground;
     private static bool _runInBackgroundCaptured;
 
@@ -41,6 +44,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _nextSnapshotAt = 0f;
         _sequence = 0;
         _selectedInstanceId = 0;
+        _interactiveHierarchyRefresh = false;
         _log.LogInfo("Background execution forced on for U3DViewer mode.");
     }
 
@@ -60,6 +64,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             ResetSnapshotState();
             ExpandedInstanceIds.Clear();
             _nextSnapshotAt = 0f;
+            _interactiveHierarchyRefresh = false;
             return;
         }
 
@@ -76,6 +81,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                 {
                     case ViewerCommandKind.SelectObject:
                         _selectedInstanceId = command.InstanceId;
+                        _interactiveHierarchyRefresh = true;
                         RestartHierarchyScan();
                         continue;
                     case ViewerCommandKind.HierarchyExpanded:
@@ -87,6 +93,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                         {
                             ExpandedInstanceIds.Remove(command.InstanceId);
                         }
+                        _interactiveHierarchyRefresh = true;
                         RestartHierarchyScan();
                         continue;
                     default:
@@ -126,6 +133,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             catch (Exception ex)
             {
                 _nextSnapshotAt = now + SnapshotRestartDelay;
+                _interactiveHierarchyRefresh = false;
                 _log?.LogError($"Failed to start IL2CPP scene scan: {ex}");
                 return;
             }
@@ -133,7 +141,14 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
         try
         {
-            _sceneScan.ProcessSlice(HierarchyNodesPerFrame, HierarchyScanBudgetMilliseconds);
+            var maxNodes = _interactiveHierarchyRefresh
+                ? InteractiveHierarchyNodesPerFrame
+                : HierarchyNodesPerFrame;
+            var budgetMilliseconds = _interactiveHierarchyRefresh
+                ? InteractiveHierarchyScanBudgetMilliseconds
+                : HierarchyScanBudgetMilliseconds;
+
+            _sceneScan.ProcessSlice(maxNodes, budgetMilliseconds);
             if (!_sceneScan.IsComplete)
             {
                 return;
@@ -143,6 +158,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             snapshot.RenderTarget = _sceneCamera?.GetRenderTargetInfo();
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            _interactiveHierarchyRefresh = false;
 
             _snapshotSerialization = Task.Run(() => JsonSnapshotWriter.Write(snapshot));
         }
@@ -150,6 +166,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
+            _interactiveHierarchyRefresh = false;
             _log?.LogError($"Failed to advance IL2CPP scene scan: {ex}");
         }
     }
@@ -159,6 +176,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         RestoreBackgroundExecution();
         ResetSnapshotState();
         ExpandedInstanceIds.Clear();
+        _interactiveHierarchyRefresh = false;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
     }
