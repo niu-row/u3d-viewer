@@ -38,7 +38,13 @@ internal static class SceneSettingsStore
             }
 
             var profile = JsonSerializer.Deserialize<SceneSettingsProfile>(File.ReadAllText(path), JsonOptions);
-            return profile?.Schema == 1 ? profile : null;
+            if (profile?.Schema != 1)
+            {
+                return null;
+            }
+
+            Normalize(profile);
+            return profile;
         }
         catch (Exception ex)
         {
@@ -51,6 +57,7 @@ internal static class SceneSettingsStore
     {
         try
         {
+            Normalize(profile);
             var path = ViewerPaths.GetSceneSettingsPath(executablePath);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(profile, JsonOptions));
@@ -60,4 +67,26 @@ internal static class SceneSettingsStore
             ViewerLog.Warning($"Could not save Scene settings for '{executablePath}': {ex.Message}");
         }
     }
+
+    private static void Normalize(SceneSettingsProfile profile)
+    {
+        profile.Schema = 1;
+        profile.FieldOfView = ClampFinite(profile.FieldOfView, 60f, 1f, 179f);
+        profile.NearClip = float.IsFinite(profile.NearClip) ? profile.NearClip : 0.001f;
+        profile.FarClip = float.IsFinite(profile.FarClip) && profile.FarClip > profile.NearClip + 0.0001f
+            ? profile.FarClip
+            : Math.Max(10000f, profile.NearClip + 1f);
+        profile.OrthographicSize = ClampFinite(profile.OrthographicSize, 5f, 0.001f, float.MaxValue);
+        profile.IdleFps = ClampFinite(profile.IdleFps, 15f, 1f, 120f);
+        profile.InteractiveFps = ClampFinite(profile.InteractiveFps, 30f, 1f, 120f);
+        profile.Width = Math.Clamp(profile.Width, 64, 4096);
+        profile.Height = Math.Clamp(profile.Height, 64, 4096);
+        if (!Enum.IsDefined(typeof(SceneCullingMode), profile.CullingMode))
+        {
+            profile.CullingMode = SceneCullingMode.MainCamera;
+        }
+    }
+
+    private static float ClampFinite(float value, float fallback, float minimum, float maximum) =>
+        float.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : fallback;
 }
