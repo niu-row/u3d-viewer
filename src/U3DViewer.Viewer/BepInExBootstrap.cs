@@ -66,7 +66,7 @@ internal static class BepInExBootstrap
         if (IsInstalled(executablePath, backend))
         {
             progress?.Report($"Detected Unity {backend} {architecture}; existing BepInEx loader matches the game architecture.");
-            return ApplyLowOverheadProfile(executablePath, "BepInEx is already installed.", progress);
+            return ApplyLowOverheadProfile(executablePath, backend, "BepInEx is already installed.", progress);
         }
 
         var gameDirectory = Path.GetDirectoryName(executablePath);
@@ -104,7 +104,7 @@ internal static class BepInExBootstrap
                     $"BepInEx {architecture} archive was extracted, but the Doorstop loader or backend preloader files are still incomplete or architecture-mismatched.");
             }
 
-            return ApplyLowOverheadProfile(executablePath, $"BepInEx {architecture} installed/repaired.", progress);
+            return ApplyLowOverheadProfile(executablePath, backend, $"BepInEx {architecture} installed/repaired.", progress);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -293,6 +293,7 @@ internal static class BepInExBootstrap
 
     private static BepInExBootstrapResult ApplyLowOverheadProfile(
         string executablePath,
+        string backend,
         string successMessage,
         IProgress<string>? progress)
     {
@@ -317,13 +318,49 @@ internal static class BepInExBootstrap
             config = UpsertIniValue(config, "Logging.Disk", "WriteUnityLog", "false");
             config = UpsertIniValue(config, "Logging.Disk", "InstantFlushing", "false");
 
+            var legacyMonoEntrypoint = IsLegacyMonoUnityLayout(executablePath, backend);
+            if (legacyMonoEntrypoint)
+            {
+                // BepInEx documents a later UnityEngine MonoBehaviour type-initializer entrypoint
+                // for Unity 5 and older. The default preloader entrypoint can run too early in
+                // these players and leave the game stuck before its first rendered frame.
+                config = UpsertIniValue(config, "Preloader.Entrypoint", "Assembly", "UnityEngine.dll");
+                config = UpsertIniValue(config, "Preloader.Entrypoint", "Type", "MonoBehaviour");
+                config = UpsertIniValue(config, "Preloader.Entrypoint", "Method", ".cctor");
+                progress?.Report("Detected legacy monolithic Unity Mono layout; using the delayed MonoBehaviour preloader entrypoint.");
+            }
+
             File.WriteAllText(configPath, config, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            return new BepInExBootstrapResult(true, successMessage + " Low-overhead logging profile with diagnostic console applied.");
+            var profileMessage = legacyMonoEntrypoint
+                ? " Low-overhead logging profile and legacy Unity preloader entrypoint applied."
+                : " Low-overhead logging profile with diagnostic console applied.";
+            return new BepInExBootstrapResult(true, successMessage + profileMessage);
         }
         catch (Exception ex)
         {
-            return new BepInExBootstrapResult(false, $"BepInEx is installed, but its low-overhead logging profile could not be applied: {ex.Message}");
+            return new BepInExBootstrapResult(false, $"BepInEx is installed, but its compatibility profile could not be applied: {ex.Message}");
         }
+    }
+
+    private static bool IsLegacyMonoUnityLayout(string executablePath, string backend)
+    {
+        if (!string.Equals(backend, "Mono", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var gameDirectory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(gameDirectory))
+        {
+            return false;
+        }
+
+        var dataDirectory = Path.Combine(
+            gameDirectory,
+            Path.GetFileNameWithoutExtension(executablePath) + "_Data");
+        var managedDirectory = Path.Combine(dataDirectory, "Managed");
+        return File.Exists(Path.Combine(managedDirectory, "UnityEngine.dll")) &&
+               !File.Exists(Path.Combine(managedDirectory, "UnityEngine.CoreModule.dll"));
     }
 
     private static string UpsertIniValue(string text, string section, string key, string value)
