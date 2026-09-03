@@ -12,6 +12,7 @@ internal sealed class SceneCameraController : IDisposable
     private const float DefaultIdleFps = 15f;
     private const float DefaultInteractiveFps = 30f;
     private const float InteractiveHoldSeconds = 0.2f;
+    private const float FollowSourceLookupInterval = 1f;
     private const float DefaultPerspectiveFov = 60f;
     private const float MinPerspectiveNear = 0.001f;
     private const float MinPerspectiveFov = 1f;
@@ -26,6 +27,7 @@ internal sealed class SceneCameraController : IDisposable
 
     private GameObject? _cameraObject;
     private Camera? _camera;
+    private Camera? _followSourceCamera;
     private RenderTexture? _renderTexture;
     private float _moveSpeed = 10f;
     private float _idleFps = DefaultIdleFps;
@@ -35,6 +37,9 @@ internal sealed class SceneCameraController : IDisposable
     private int _renderGeneration;
     private float _nextRenderAt;
     private float _interactiveUntil;
+    private float _nextFollowSourceLookupAt;
+    private bool _followPosition;
+    private bool _followRotation;
     private bool _bridgeReady;
     private IntPtr _renderEvent;
     private int _copyEventId;
@@ -98,6 +103,14 @@ internal sealed class SceneCameraController : IDisposable
             case ViewerCommandKind.CameraCullingMask:
                 BoostInteractiveRender();
                 break;
+            case ViewerCommandKind.CameraFollowTransform:
+                _followPosition = command.Flag;
+                _followRotation = command.Flag2;
+                _followSourceCamera = null;
+                _nextFollowSourceLookupAt = 0f;
+                ApplyFollowTransform(forceLookup: true);
+                BoostInteractiveRender();
+                break;
             case ViewerCommandKind.CameraReset:
                 CopyFromGameCamera();
                 BoostInteractiveRender();
@@ -123,6 +136,8 @@ internal sealed class SceneCameraController : IDisposable
         {
             return;
         }
+
+        ApplyFollowTransform();
 
         var fps = now < _interactiveUntil ? _interactiveFps : _idleFps;
         _nextRenderAt = now + 1f / Mathf.Max(MinStreamFps, fps);
@@ -355,6 +370,40 @@ internal sealed class SceneCameraController : IDisposable
         _sceneFpsWindowFrames = 0;
     }
 
+    private void ApplyFollowTransform(bool forceLookup = false)
+    {
+        var camera = _camera;
+        if (camera is null || (!_followPosition && !_followRotation))
+        {
+            return;
+        }
+
+        var now = Time.unscaledTime;
+        if (forceLookup || _followSourceCamera is null || now >= _nextFollowSourceLookupAt)
+        {
+            _nextFollowSourceLookupAt = now + FollowSourceLookupInterval;
+            var source = Camera.main;
+            _followSourceCamera = source is null || source == camera ? null : source;
+        }
+
+        var followSource = _followSourceCamera;
+        if (followSource is null || followSource == camera)
+        {
+            return;
+        }
+
+        var transform = camera.transform;
+        var sourceTransform = followSource.transform;
+        if (_followPosition)
+        {
+            transform.position = sourceTransform.position;
+        }
+        if (_followRotation)
+        {
+            transform.rotation = sourceTransform.rotation;
+        }
+    }
+
     private static double ElapsedMilliseconds(long started) =>
         (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
 
@@ -379,6 +428,8 @@ internal sealed class SceneCameraController : IDisposable
         var source = Camera.main;
         if (source is null || source == camera)
         {
+            _followSourceCamera = null;
+            _nextFollowSourceLookupAt = 0f;
             _sourceProjectionInfo = "Source Camera: unavailable";
             _preferredOrthographicSize = 5f;
             camera.transform.position = new Vector3(0f, 2f, -5f);
@@ -392,6 +443,8 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
+        _followSourceCamera = source;
+        _nextFollowSourceLookupAt = Time.unscaledTime + FollowSourceLookupInterval;
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
         camera.clearFlags = source.clearFlags;
@@ -557,6 +610,7 @@ internal sealed class SceneCameraController : IDisposable
             _camera.targetTexture = null;
         }
 
+        _followSourceCamera = null;
         ReleaseRenderTexture();
 
         if (_cameraObject is not null)
