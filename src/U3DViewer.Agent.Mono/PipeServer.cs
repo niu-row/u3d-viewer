@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+#if LEGACY_MONO
+using System.Runtime.InteropServices;
+#endif
 using System.Text;
 using System.Threading;
 using BepInEx.Logging;
@@ -11,6 +14,20 @@ namespace U3DViewer.Agent.Mono;
 
 internal sealed class PipeServer : IDisposable
 {
+#if LEGACY_MONO
+    private const uint PipeAccessDuplex = 0x00000003;
+    private const uint PipeTypeByte = 0x00000000;
+    private const uint PipeReadModeByte = 0x00000000;
+    private const uint PipeWait = 0x00000000;
+    private const int ErrorBrokenPipe = 109;
+    private const int ErrorNoData = 232;
+    private const int ErrorPipeConnected = 535;
+    private const int ErrorOperationAborted = 995;
+    private const int ErrorInvalidHandle = 6;
+    private const int NativePipeBufferSize = 64 * 1024;
+    private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+#endif
+
     private readonly string _pipeName;
     private readonly ManualLogSource _log;
     private readonly Queue<string> _outbound = new Queue<string>();
@@ -19,7 +36,12 @@ internal sealed class PipeServer : IDisposable
     private readonly object _inboundLock = new object();
     private readonly AutoResetEvent _signal = new AutoResetEvent(false);
     private Thread? _thread;
+#if LEGACY_MONO
+    private readonly object _nativePipeLock = new object();
+    private IntPtr _activeNativePipe = IntPtr.Zero;
+#else
     private NamedPipeServerStream? _activePipe;
+#endif
     private volatile bool _stopping;
     private volatile bool _viewerConnected;
 
@@ -93,114 +115,120 @@ internal sealed class PipeServer : IDisposable
     private void Run()
     {
 #if LEGACY_MONO
-        RunLegacy();
+        RunLegacyNative();
 #else
         RunModern();
 #endif
     }
 
 #if LEGACY_MONO
-    private void RunLegacy()
+    private void RunLegacyNative()
     {
-        NamedPipeServerStream? pipe = null;
+        var path = @"\\.\pipe\" + _pipeName;
+        var pipe = CreateNamedPipe(
+            path,
+            PipeAccessDuplex,
+            PipeTypeByte | PipeReadModeByte | PipeWait,
+            1,
+            NativePipeBufferSize,
+            NativePipeBufferSize,
+            0,
+            IntPtr.Zero);
+
+        if (pipe == InvalidHandleValue || pipe == IntPtr.Zero)
+        {
+            var error = Marshal.GetLastWin32Error();
+            _log.LogError($"Legacy native pipe creation failed (Win32 {error}).");
+            return;
+        }
+
+        lock (_nativePipeLock)
+        {
+            _activeNativePipe = pipe;
+        }
+
         try
         {
-            pipe = new NamedPipeServerStream(
-                _pipeName,
-                PipeDirection.InOut,
-                1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.None);
-            _activePipe = pipe;
-
             while (!_stopping)
             {
+                ClearConnectionState();
+                DisconnectNamedPipe(pipe);
+
+                _log.LogInfo($"Waiting for viewer on native pipe '{_pipeName}'...");
+                if (!ConnectNamedPipe(pipe, IntPtr.Zero))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error != ErrorPipeConnected)
+                    {
+                        if (_stopping && (error == ErrorOperationAborted || error == ErrorInvalidHandle))
+                        {
+                            break;
+                        }
+
+                        if (!_stopping)
+                        {
+                            _log.LogWarning($"Legacy native pipe connect failed (Win32 {error}).");
+                            Thread.Sleep(100);
+                        }
+                        continue;
+                    }
+                }
+
+                if (_stopping)
+                {
+                    break;
+                }
+
+                _viewerConnected = true;
+                _log.LogInfo("Viewer connected through native legacy pipe.");
+
                 try
                 {
-                    TryDisconnectLegacy(pipe);
-
-                    _log.LogInfo($"Waiting for viewer on pipe '{_pipeName}'...");
-                    pipe.WaitForConnection();
-                    _viewerConnected = true;
-                    _log.LogInfo("Viewer connected.");
-                    ServeLegacyConnection(pipe);
-                }
-                catch (IOException ex)
-                {
-                    if (!_stopping)
-                    {
-                        _log.LogWarning($"Viewer pipe disconnected: {ex.Message}");
-                        Thread.Sleep(100);
-                    }
-                }
-                catch (ObjectDisposedException)
-                {
-                    if (_stopping)
-                    {
-                        break;
-                    }
-                    throw;
+                    ServeLegacyNativeConnection(pipe);
                 }
                 catch (Exception ex)
                 {
                     if (!_stopping)
                     {
-                        _log.LogError($"Legacy pipe session failed: {ex}");
-                        Thread.Sleep(250);
+                        _log.LogWarning($"Legacy native pipe session ended: {ex.Message}");
                     }
                 }
                 finally
                 {
+                    _viewerConnected = false;
+                    DisconnectNamedPipe(pipe);
                     ClearConnectionState();
                 }
             }
         }
-        catch (ObjectDisposedException)
-        {
-            if (!_stopping)
-            {
-                _log.LogError("Legacy pipe server was disposed unexpectedly.");
-            }
-        }
-        catch (Exception ex)
-        {
-            if (!_stopping)
-            {
-                _log.LogError($"Legacy pipe server failed to initialize: {ex}");
-            }
-        }
         finally
         {
-            _activePipe = null;
-            if (pipe != null)
+            var shouldClose = false;
+            lock (_nativePipeLock)
             {
-                try { pipe.Dispose(); } catch { }
+                if (_activeNativePipe == pipe)
+                {
+                    _activeNativePipe = IntPtr.Zero;
+                    shouldClose = true;
+                }
+            }
+
+            if (shouldClose)
+            {
+                CloseHandle(pipe);
             }
             ClearConnectionState();
         }
     }
 
-    private void ServeLegacyConnection(NamedPipeServerStream pipe)
+    private void ServeLegacyNativeConnection(IntPtr pipe)
     {
         var readerFinished = 0;
         var readerThread = new Thread(() =>
         {
             try
             {
-                ReadCommandsLegacy(pipe);
-            }
-            catch (IOException)
-            {
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            catch (Exception ex)
-            {
-                if (!_stopping)
-                {
-                    _log.LogWarning($"Legacy pipe reader stopped: {ex.Message}");
-                }
+                ReadCommandsNative(pipe);
             }
             finally
             {
@@ -210,25 +238,21 @@ internal sealed class PipeServer : IDisposable
         })
         {
             IsBackground = true,
-            Name = "U3DViewer.PipeReader"
+            Name = "U3DViewer.NativePipeReader"
         };
         readerThread.Start();
 
         try
         {
-            var writer = new StreamWriter(pipe, new UTF8Encoding(false))
-            {
-                AutoFlush = true
-            };
-
-            // Mono's legacy NamedPipeServerStream.IsConnected is not reliable enough to
-            // use as session liveness. Keep the session alive until the reader observes
-            // EOF/an exception, or a write fails, or the server is stopping.
             while (!_stopping && Interlocked.CompareExchange(ref readerFinished, 0, 0) == 0)
             {
                 if (TryDequeueOutbound(out var payload))
                 {
-                    writer.WriteLine(payload);
+                    var bytes = Encoding.UTF8.GetBytes(payload + "\n");
+                    if (!WriteNative(pipe, bytes))
+                    {
+                        break;
+                    }
                 }
                 else
                 {
@@ -238,39 +262,137 @@ internal sealed class PipeServer : IDisposable
         }
         finally
         {
-            TryDisconnectLegacy(pipe);
+            DisconnectNamedPipe(pipe);
             readerThread.Join(500);
         }
     }
 
-    private void ReadCommandsLegacy(NamedPipeServerStream pipe)
+    private void ReadCommandsNative(IntPtr pipe)
     {
-        var reader = new StreamReader(pipe, Encoding.UTF8);
-        while (!_stopping)
+        var buffer = new byte[4096];
+        using (var lineBuffer = new MemoryStream())
         {
-            var line = reader.ReadLine();
-            if (line is null)
+            while (!_stopping)
             {
-                break;
+                int bytesRead;
+                if (!ReadFile(pipe, buffer, buffer.Length, out bytesRead, IntPtr.Zero))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (!_stopping && error != ErrorBrokenPipe && error != ErrorNoData &&
+                        error != ErrorOperationAborted && error != ErrorInvalidHandle)
+                    {
+                        _log.LogWarning($"Legacy native pipe read failed (Win32 {error}).");
+                    }
+                    break;
+                }
+
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                for (var index = 0; index < bytesRead; index++)
+                {
+                    var value = buffer[index];
+                    if (value == (byte)'\n')
+                    {
+                        var lineBytes = lineBuffer.ToArray();
+                        lineBuffer.SetLength(0);
+                        var length = lineBytes.Length;
+                        if (length > 0 && lineBytes[length - 1] == (byte)'\r')
+                        {
+                            length--;
+                        }
+
+                        if (length > 0)
+                        {
+                            EnqueueCommand(Encoding.UTF8.GetString(lineBytes, 0, length));
+                        }
+                        continue;
+                    }
+
+                    lineBuffer.WriteByte(value);
+                    if (lineBuffer.Length > NativePipeBufferSize)
+                    {
+                        lineBuffer.SetLength(0);
+                        _log.LogWarning("Discarded an oversized legacy Viewer command.");
+                    }
+                }
+            }
+        }
+    }
+
+    private bool WriteNative(IntPtr pipe, byte[] bytes)
+    {
+        var offset = 0;
+        while (offset < bytes.Length && !_stopping)
+        {
+            var remaining = bytes.Length - offset;
+            var chunk = remaining;
+            var send = bytes;
+            if (offset != 0)
+            {
+                send = new byte[remaining];
+                Buffer.BlockCopy(bytes, offset, send, 0, remaining);
             }
 
-            EnqueueCommand(line);
+            int written;
+            if (!WriteFile(pipe, send, chunk, out written, IntPtr.Zero) || written <= 0)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (!_stopping && error != ErrorBrokenPipe && error != ErrorNoData &&
+                    error != ErrorOperationAborted && error != ErrorInvalidHandle)
+                {
+                    _log.LogWarning($"Legacy native pipe write failed (Win32 {error}).");
+                }
+                return false;
+            }
+
+            offset += written;
         }
+        return offset == bytes.Length;
     }
 
-    private static void TryDisconnectLegacy(NamedPipeServerStream pipe)
-    {
-        try
-        {
-            pipe.Disconnect();
-        }
-        catch (IOException)
-        {
-        }
-        catch (InvalidOperationException)
-        {
-        }
-    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateNamedPipe(
+        string lpName,
+        uint dwOpenMode,
+        uint dwPipeMode,
+        uint nMaxInstances,
+        uint nOutBufferSize,
+        uint nInBufferSize,
+        uint nDefaultTimeOut,
+        IntPtr lpSecurityAttributes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConnectNamedPipe(IntPtr hNamedPipe, IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DisconnectNamedPipe(IntPtr hNamedPipe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReadFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        int nNumberOfBytesToRead,
+        out int lpNumberOfBytesRead,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        int nNumberOfBytesToWrite,
+        out int lpNumberOfBytesWritten,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
 #else
     private void RunModern()
     {
@@ -348,14 +470,6 @@ internal sealed class PipeServer : IDisposable
             }
         }
     }
-#endif
-
-    private void ClearConnectionState()
-    {
-        _viewerConnected = false;
-        lock (_outboundLock) _outbound.Clear();
-        lock (_inboundLock) _inbound.Clear();
-    }
 
     private void ReadCommands(NamedPipeServerStream pipe)
     {
@@ -370,6 +484,14 @@ internal sealed class PipeServer : IDisposable
 
             EnqueueCommand(line);
         }
+    }
+#endif
+
+    private void ClearConnectionState()
+    {
+        _viewerConnected = false;
+        lock (_outboundLock) _outbound.Clear();
+        lock (_inboundLock) _inbound.Clear();
     }
 
     private void EnqueueCommand(string line)
@@ -392,7 +514,20 @@ internal sealed class PipeServer : IDisposable
         _stopping = true;
         _viewerConnected = false;
         _signal.Set();
+#if LEGACY_MONO
+        IntPtr nativePipe;
+        lock (_nativePipeLock)
+        {
+            nativePipe = _activeNativePipe;
+            _activeNativePipe = IntPtr.Zero;
+        }
+        if (nativePipe != IntPtr.Zero && nativePipe != InvalidHandleValue)
+        {
+            CloseHandle(nativePipe);
+        }
+#else
         try { _activePipe?.Dispose(); } catch { }
+#endif
         _thread?.Join(1000);
         _signal.Close();
     }
