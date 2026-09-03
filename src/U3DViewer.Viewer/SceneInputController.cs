@@ -2,7 +2,6 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Interactivity;
 using Avalonia.Threading;
 using U3DViewer.Protocol;
 
@@ -168,7 +167,7 @@ internal sealed class SceneInputController : IDisposable
         e.Handled = true;
     }
 
-    private void OnLostFocus(object? sender, RoutedEventArgs e)
+    private void OnLostFocus(object? sender, FocusChangedEventArgs e)
     {
         _pressedKeys.Clear();
         _rightMouseLook = false;
