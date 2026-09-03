@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+#if LEGACY_MONO
+using HarmonyLib;
+#endif
 #if !LEGACY_MONO
 using System.Threading.Tasks;
 #endif
@@ -25,12 +28,21 @@ public sealed class Plugin : BaseUnityPlugin
     private const double HierarchyScanBudgetMilliseconds = 0.75;
     private const int InteractiveHierarchyNodesPerFrame = 256;
     private const double InteractiveHierarchyScanBudgetMilliseconds = 2.0;
+#if LEGACY_MONO
+    private const int LegacyRenderWidth = 1280;
+    private const int LegacyRenderHeight = 720;
+#endif
 
     private readonly HashSet<int> _expandedInstanceIds = new HashSet<int>();
     private PipeServer? _pipeServer;
     private SceneCameraController? _sceneCamera;
     private SceneCullingController? _sceneCulling;
     private SceneScanner.SceneScanSession? _sceneScan;
+#if LEGACY_MONO
+    private Harmony? _backgroundHarmony;
+    private bool _legacyResizeNoticeLogged;
+    private bool _legacyRecoverNoticeLogged;
+#endif
 #if !LEGACY_MONO
     private Task<SerializedSnapshot>? _snapshotSerialization;
 #endif
@@ -65,6 +77,9 @@ public sealed class Plugin : BaseUnityPlugin
         _originalRunInBackground = Application.runInBackground;
         _runInBackgroundCaptured = true;
         Application.runInBackground = true;
+#if LEGACY_MONO
+        InstallBackgroundExecutionGuard();
+#endif
 
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
         _sceneCamera = null;
@@ -72,6 +87,10 @@ public sealed class Plugin : BaseUnityPlugin
         _pipeServer = new PipeServer(pipeName, LogSource);
         _pipeServer.Start();
         _sceneScan = null;
+#if LEGACY_MONO
+        _legacyResizeNoticeLogged = false;
+        _legacyRecoverNoticeLogged = false;
+#endif
 #if !LEGACY_MONO
         _snapshotSerialization = null;
 #endif
@@ -82,7 +101,7 @@ public sealed class Plugin : BaseUnityPlugin
         _viewerSessionActive = false;
         ResetPerformanceMetrics();
 #if LEGACY_MONO
-        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}. Background execution enabled; Scene resources remain passive until Viewer connects.");
+        LogSource.LogInfo($"U3D Viewer Mono agent loaded in legacy CLR 2.0/.NET 3.5 mode. Pipe: {pipeName}. Background execution guarded; Scene resources remain passive until Viewer connects.");
 #else
         LogSource.LogInfo($"U3D Viewer Mono agent loaded. Pipe: {pipeName}. Background execution enabled; Scene resources remain passive until Viewer connects.");
 #endif
@@ -90,13 +109,9 @@ public sealed class Plugin : BaseUnityPlugin
 
     private void Update()
     {
-        // Some games rewrite this setting during startup. Assert it before looking at the
-        // Viewer connection so the game is already background-capable before Viewer focus
-        // can pause the Unity main thread.
-        if (!Application.runInBackground)
-        {
-            Application.runInBackground = true;
-        }
+        // Keep this fallback even when the legacy native setter guard is installed. It also
+        // protects modern Mono games that rewrite the setting during startup.
+        EnsureBackgroundExecution();
 
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
@@ -146,7 +161,52 @@ public sealed class Plugin : BaseUnityPlugin
                         RestartHierarchyScan();
                         continue;
                     default:
+#if LEGACY_MONO
+                        var sceneCommand = command;
+                        var applySceneCommand = true;
+                        if (command.Kind == ViewerCommandKind.CameraStreamSettings)
+                        {
+                            var requestedWidth = (int)command.Z;
+                            var requestedHeight = (int)command.Value;
+                            if ((requestedWidth != LegacyRenderWidth || requestedHeight != LegacyRenderHeight) &&
+                                !_legacyResizeNoticeLogged)
+                            {
+                                _legacyResizeNoticeLogged = true;
+                                LogSource.LogInfo(
+                                    $"Legacy Unity Scene source is locked at {LegacyRenderWidth}x{LegacyRenderHeight}; Viewer viewport resizing will scale presentation without recreating the game RenderTexture.");
+                            }
+
+                            // Unity 5.x can still have render-thread/plugin events referencing the
+                            // current RenderTexture when the Viewer resizes. Releasing/recreating it
+                            // here can race the old render thread and crash the game. Preserve only
+                            // the requested FPS values and keep the source texture dimensions fixed.
+                            sceneCommand = new ViewerCommand(
+                                ViewerCommandKind.CameraStreamSettings,
+                                command.X,
+                                command.Y,
+                                LegacyRenderWidth,
+                                LegacyRenderHeight);
+                        }
+                        else if (command.Kind == ViewerCommandKind.CameraRecover)
+                        {
+                            // The Viewer presenter already retries OpenSharedResource. Do not use
+                            // destructive RenderTexture recreation as a watchdog recovery on old
+                            // Unity; a transient presenter open failure must not endanger the game.
+                            applySceneCommand = false;
+                            if (!_legacyRecoverNoticeLogged)
+                            {
+                                _legacyRecoverNoticeLogged = true;
+                                LogSource.LogInfo("Ignored destructive Scene transport recovery on legacy Unity; presenter will retry the existing shared generation.");
+                            }
+                        }
+
+                        if (applySceneCommand)
+                        {
+                            _sceneCamera?.Apply(sceneCommand);
+                        }
+#else
                         _sceneCamera?.Apply(command);
+#endif
                         if (command.Kind == ViewerCommandKind.CameraCullingMask)
                         {
                             _sceneCulling?.Apply(command);
@@ -283,6 +343,72 @@ public sealed class Plugin : BaseUnityPlugin
             LogSource.LogError($"Failed to advance scene scan: {ex}");
         }
     }
+
+    private void EnsureBackgroundExecution()
+    {
+        if (!Application.runInBackground)
+        {
+            Application.runInBackground = true;
+        }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        if (!hasFocus)
+        {
+            EnsureBackgroundExecution();
+        }
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+        if (pauseStatus)
+        {
+            EnsureBackgroundExecution();
+        }
+    }
+
+#if LEGACY_MONO
+    private void InstallBackgroundExecutionGuard()
+    {
+        var harmony = new Harmony(PluginGuid + ".background");
+        try
+        {
+            // HarmonyX 2.10.2 (bundled by this BepInEx build) routes no-IL/internal-call
+            // methods through its NativeDetourMethodPatcher. This guards the actual Unity
+            // setter, so game focus handlers never get a chance to commit false.
+            harmony.PatchAll(typeof(RunInBackgroundPatch));
+            _backgroundHarmony = harmony;
+            Application.runInBackground = true;
+            LogSource.LogInfo("Installed native runInBackground setter guard for legacy Unity.");
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                harmony.UnpatchSelf();
+            }
+            catch
+            {
+            }
+            _backgroundHarmony = null;
+            LogSource.LogWarning($"Could not install runInBackground setter guard; focus callbacks will remain as fallback: {ex.Message}");
+        }
+    }
+
+    [HarmonyPatch(typeof(Application), "set_runInBackground")]
+    private static class RunInBackgroundPatch
+    {
+        [HarmonyPrefix]
+        private static void ForceEnabled(ref bool __0)
+        {
+            if (!__0)
+            {
+                __0 = true;
+            }
+        }
+    }
+#endif
 
     private void BeginViewerSession()
     {
@@ -444,6 +570,22 @@ public sealed class Plugin : BaseUnityPlugin
         EndViewerSession();
         _pipeServer?.Dispose();
         _pipeServer = null;
+
+#if LEGACY_MONO
+        var backgroundHarmony = _backgroundHarmony;
+        _backgroundHarmony = null;
+        if (backgroundHarmony is not null)
+        {
+            try
+            {
+                backgroundHarmony.UnpatchSelf();
+            }
+            catch (Exception ex)
+            {
+                LogSource.LogWarning($"Could not remove runInBackground setter guard during shutdown: {ex.Message}");
+            }
+        }
+#endif
 
         if (_runInBackgroundCaptured)
         {
