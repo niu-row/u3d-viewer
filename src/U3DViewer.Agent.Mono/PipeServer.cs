@@ -92,6 +92,167 @@ internal sealed class PipeServer : IDisposable
 
     private void Run()
     {
+#if LEGACY_MONO
+        RunLegacy();
+#else
+        RunModern();
+#endif
+    }
+
+#if LEGACY_MONO
+    private void RunLegacy()
+    {
+        NamedPipeServerStream? pipe = null;
+        try
+        {
+            pipe = new NamedPipeServerStream(
+                _pipeName,
+                PipeDirection.InOut,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.None);
+            _activePipe = pipe;
+
+            while (!_stopping)
+            {
+                try
+                {
+                    if (pipe.IsConnected)
+                    {
+                        try
+                        {
+                            pipe.Disconnect();
+                        }
+                        catch (IOException)
+                        {
+                        }
+                        catch (InvalidOperationException)
+                        {
+                        }
+                    }
+
+                    _log.LogInfo($"Waiting for viewer on pipe '{_pipeName}'...");
+                    pipe.WaitForConnection();
+                    _viewerConnected = true;
+                    _log.LogInfo("Viewer connected.");
+                    ServeLegacyConnection(pipe);
+                }
+                catch (IOException ex)
+                {
+                    if (!_stopping)
+                    {
+                        _log.LogWarning($"Viewer pipe disconnected: {ex.Message}");
+                        Thread.Sleep(100);
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                    if (_stopping)
+                    {
+                        break;
+                    }
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    if (!_stopping)
+                    {
+                        _log.LogError($"Legacy pipe session failed: {ex}");
+                        Thread.Sleep(250);
+                    }
+                }
+                finally
+                {
+                    ClearConnectionState();
+                }
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            if (!_stopping)
+            {
+                _log.LogError("Legacy pipe server was disposed unexpectedly.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!_stopping)
+            {
+                _log.LogError($"Legacy pipe server failed to initialize: {ex}");
+            }
+        }
+        finally
+        {
+            _activePipe = null;
+            if (pipe != null)
+            {
+                try { pipe.Dispose(); } catch { }
+            }
+            ClearConnectionState();
+        }
+    }
+
+    private void ServeLegacyConnection(NamedPipeServerStream pipe)
+    {
+        var readerFinished = 0;
+        var readerThread = new Thread(() =>
+        {
+            try
+            {
+                ReadCommands(pipe);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref readerFinished, 1);
+                _signal.Set();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "U3DViewer.PipeReader"
+        };
+        readerThread.Start();
+
+        try
+        {
+            var writer = new StreamWriter(pipe, new UTF8Encoding(false))
+            {
+                AutoFlush = true
+            };
+
+            while (!_stopping && pipe.IsConnected && Interlocked.CompareExchange(ref readerFinished, 0, 0) == 0)
+            {
+                if (TryDequeueOutbound(out var payload))
+                {
+                    writer.WriteLine(payload);
+                }
+                else
+                {
+                    _signal.WaitOne(250);
+                }
+            }
+        }
+        finally
+        {
+            if (pipe.IsConnected)
+            {
+                try
+                {
+                    pipe.Disconnect();
+                }
+                catch (IOException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }
+            readerThread.Join(500);
+        }
+    }
+#else
+    private void RunModern()
+    {
         while (!_stopping)
         {
             try
@@ -161,12 +322,18 @@ internal sealed class PipeServer : IDisposable
             }
             finally
             {
-                _viewerConnected = false;
+                ClearConnectionState();
                 _activePipe = null;
-                lock (_outboundLock) _outbound.Clear();
-                lock (_inboundLock) _inbound.Clear();
             }
         }
+    }
+#endif
+
+    private void ClearConnectionState()
+    {
+        _viewerConnected = false;
+        lock (_outboundLock) _outbound.Clear();
+        lock (_inboundLock) _inbound.Clear();
     }
 
     private void ReadCommands(NamedPipeServerStream pipe)
