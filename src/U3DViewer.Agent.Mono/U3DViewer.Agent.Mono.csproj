@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>U3DViewer.Agent.Mono</AssemblyName>
+    <RootNamespace>U3DViewer.Agent.Mono</RootNamespace>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Core" Version="6.0.0-be.785" />
+    <PackageReference Include="BepInEx.Unity.Mono" Version="6.0.0-be.785" />
+    <ProjectReference Include="..\U3DViewer.Protocol\U3DViewer.Protocol.csproj" />
+  </ItemGroup>
+
+  <!-- Copy these assemblies from the target game's <Game>_Data/Managed folder into ./lib. -->
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>lib\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.SceneManagementModule">
+      <HintPath>lib\UnityEngine.SceneManagementModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
