@@ -34,11 +34,14 @@ internal static class SceneCullingUi
             MinWidth = 100,
             IsEnabled = false
         };
+        var maskLabel = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center
+        };
         var maskStatus = new TextBlock
         {
             Text = "0xFFFFFFFF",
-            VerticalAlignment = VerticalAlignment.Center,
-            FontFamily = FontFamily.Default
+            VerticalAlignment = VerticalAlignment.Center
         };
 
         var bar = new StackPanel
@@ -52,11 +55,7 @@ internal static class SceneCullingUi
                 label,
                 selector,
                 layersButton,
-                new TextBlock
-                {
-                    Text = "Mask",
-                    VerticalAlignment = VerticalAlignment.Center
-                },
+                maskLabel,
                 maskStatus
             }
         };
@@ -79,12 +78,13 @@ internal static class SceneCullingUi
         {
             label.Text = Local("Culling Mask", "剔除遮罩");
             layersButton.Content = Local("Layers…", "图层…");
+            maskLabel.Text = Local("Mask", "遮罩");
 
             var currentMode = latestTarget?.CullingMode ?? SceneCullingMode.MainCamera;
             syncing = true;
-            selector.ItemsSource = BuildModeOptions();
-            selector.SelectedItem = ((IEnumerable<CullingModeOption>)selector.ItemsSource)
-                .First(option => option.Mode == currentMode);
+            var items = BuildModeOptions();
+            selector.ItemsSource = items;
+            selector.SelectedItem = items.First(option => option.Mode == currentMode);
             syncing = false;
         }
 
@@ -121,12 +121,10 @@ internal static class SceneCullingUi
         layersButton.Click += (_, _) =>
         {
             var target = latestTarget;
-            if (target is null)
+            if (target is not null)
             {
-                return;
+                ShowManualLayerEditor(window, target, connection);
             }
-
-            ShowManualLayerEditor(window, target, connection);
         };
 
         void OnSnapshot(SceneSnapshot snapshot) =>
@@ -152,10 +150,8 @@ internal static class SceneCullingUi
         var layersGrid = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,*"),
-            RowDefinitions = new RowDefinitions(string.Join(',', Enumerable.Repeat("Auto", 16))),
-            Margin = new Thickness(12),
-            ColumnSpacing = 18,
-            RowSpacing = 4
+            RowDefinitions = new RowDefinitions(string.Join(",", Enumerable.Repeat("Auto", 16))),
+            Margin = new Thickness(12)
         };
 
         var unsignedMask = unchecked((uint)target.CullingMask);
@@ -173,7 +169,8 @@ internal static class SceneCullingUi
             {
                 Content = $"{layer}: {layerName}",
                 IsChecked = (unsignedMask & (1u << layer)) != 0,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 2)
             };
             checkBoxes[layer] = checkBox;
             Grid.SetColumn(checkBox, layer / 16);
