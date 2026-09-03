@@ -8,6 +8,7 @@ public enum ViewerCommandKind
     CameraLook,
     CameraSpeed,
     CameraProjection,
+    CameraLens,
     CameraReset,
     CameraFocus,
     SelectObject
@@ -48,6 +49,9 @@ public static class ViewerCommandCodec
 
     public static string EncodeCameraProjection(bool orthographic) =>
         $"camera.projection\t{(orthographic ? "orthographic" : "perspective")}";
+
+    public static string EncodeCameraLens(float fieldOfView, float nearClip, float farClip, float orthographicSize) =>
+        string.Join("\t", "camera.lens", F(fieldOfView), F(nearClip), F(farClip), F(orthographicSize));
 
     public static string EncodeCameraReset() => "camera.reset";
 
@@ -98,6 +102,19 @@ public static class ViewerCommandCodec
                     return true;
                 }
                 return false;
+
+            case "camera.lens" when parts.Length == 5 &&
+                TryF(parts[1], out var fieldOfView) &&
+                TryF(parts[2], out var nearClip) &&
+                TryF(parts[3], out var farClip) &&
+                TryF(parts[4], out var orthographicSize):
+                command = new ViewerCommand(
+                    ViewerCommandKind.CameraLens,
+                    fieldOfView,
+                    nearClip,
+                    farClip,
+                    orthographicSize);
+                return true;
 
             case "camera.reset" when parts.Length == 1:
                 command = new ViewerCommand(ViewerCommandKind.CameraReset);
