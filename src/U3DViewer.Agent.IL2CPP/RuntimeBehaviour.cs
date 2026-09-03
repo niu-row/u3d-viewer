@@ -34,6 +34,9 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static int _lastScanNodes;
     private static double _lastSerializeMs;
     private static int _lastSnapshotBytes;
+    private static float _gameFpsWindowStart;
+    private static int _gameFpsWindowFrames;
+    private static double _gameFps;
     private static bool _originalRunInBackground;
     private static bool _runInBackgroundCaptured;
 
@@ -87,6 +90,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         {
             Application.runInBackground = true;
         }
+
+        UpdateGameFps();
 
         while (pipeServer.TryDequeueCommand(out var command))
         {
@@ -261,6 +266,7 @@ public sealed class RuntimeBehaviour : MonoBehaviour
 
     private static PerformanceInfo BuildPerformanceInfo() => new()
     {
+        GameFps = _gameFps,
         HierarchyNodes = _lastScanNodes,
         HierarchyScanMs = _lastScanMs,
         HierarchyScanAverageMs = _averageScanMs,
@@ -268,6 +274,27 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         SnapshotSerializeMs = _lastSerializeMs,
         SnapshotBytes = _lastSnapshotBytes
     };
+
+    private static void UpdateGameFps()
+    {
+        var now = Time.unscaledTime;
+        if (_gameFpsWindowStart <= 0f)
+        {
+            _gameFpsWindowStart = now;
+            _gameFpsWindowFrames = 0;
+        }
+
+        _gameFpsWindowFrames++;
+        var elapsed = now - _gameFpsWindowStart;
+        if (elapsed < 0.5f)
+        {
+            return;
+        }
+
+        _gameFps = elapsed > 0f ? _gameFpsWindowFrames / elapsed : 0d;
+        _gameFpsWindowStart = now;
+        _gameFpsWindowFrames = 0;
+    }
 
     private static void RecordHierarchyScan(int nodes, double milliseconds)
     {
@@ -309,6 +336,9 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _lastScanNodes = 0;
         _lastSerializeMs = 0;
         _lastSnapshotBytes = 0;
+        _gameFpsWindowStart = 0f;
+        _gameFpsWindowFrames = 0;
+        _gameFps = 0d;
     }
 
     private static void RestoreBackgroundExecution()
