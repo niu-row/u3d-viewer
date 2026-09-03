@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using U3DViewer.Protocol;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -6,92 +7,197 @@ namespace U3DViewer.Agent.Mono;
 
 internal static class SceneScanner
 {
-    public static SceneSnapshot Capture(long sequence, int selectedInstanceId)
+    public static SceneScanSession Begin(long sequence, int selectedInstanceId)
     {
         var scenes = new SceneInfo[SceneManager.sceneCount];
+        var pending = new Queue<SceneScanWorkItem>();
 
-        for (var i = 0; i < SceneManager.sceneCount; i++)
+        for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
         {
-            var scene = SceneManager.GetSceneAt(i);
+            var scene = SceneManager.GetSceneAt(sceneIndex);
             var roots = scene.GetRootGameObjects();
             var rootInfos = new GameObjectInfo[roots.Length];
 
-            for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
-            {
-                rootInfos[rootIndex] = CaptureGameObject(roots[rootIndex], selectedInstanceId);
-            }
-
-            scenes[i] = new SceneInfo
+            scenes[sceneIndex] = new SceneInfo
             {
                 BuildIndex = scene.buildIndex,
                 Name = scene.name ?? string.Empty,
                 IsLoaded = scene.isLoaded,
                 Roots = rootInfos
             };
+
+            for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+            {
+                pending.Enqueue(new SceneScanWorkItem(roots[rootIndex], rootInfos, rootIndex));
+            }
         }
 
-        return new SceneSnapshot
-        {
-            Sequence = sequence,
-            UnixTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            Scenes = scenes
-        };
+        return new SceneScanSession(
+            new SceneSnapshot
+            {
+                Sequence = sequence,
+                UnixTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Scenes = scenes
+            },
+            selectedInstanceId,
+            pending);
     }
 
-    private static GameObjectInfo CaptureGameObject(GameObject gameObject, int selectedInstanceId)
+    internal sealed class SceneScanSession
     {
-        var instanceId = gameObject.GetInstanceID();
-        var transform = gameObject.transform;
-        var children = new GameObjectInfo[transform.childCount];
+        private readonly int _selectedInstanceId;
+        private readonly Queue<SceneScanWorkItem> _pending;
 
-        for (var i = 0; i < transform.childCount; i++)
+        internal SceneScanSession(
+            SceneSnapshot snapshot,
+            int selectedInstanceId,
+            Queue<SceneScanWorkItem> pending)
         {
-            children[i] = CaptureGameObject(transform.GetChild(i).gameObject, selectedInstanceId);
+            Snapshot = snapshot;
+            _selectedInstanceId = selectedInstanceId;
+            _pending = pending;
         }
 
-        var isSelected = instanceId == selectedInstanceId;
-        var transformInfo = new TransformInfo();
-        var componentNames = Array.Empty<string>();
-        var layer = 0;
-        var tag = string.Empty;
+        public SceneSnapshot Snapshot { get; }
+        public bool IsComplete => _pending.Count == 0;
 
-        if (isSelected)
+        public int ProcessSlice(int maxNodes, double budgetMilliseconds)
         {
-            layer = gameObject.layer;
-            tag = ReadTag(gameObject);
-            transformInfo = new TransformInfo
+            if (maxNodes <= 0 || _pending.Count == 0)
             {
-                Position = ToInfo(transform.position),
-                LocalPosition = ToInfo(transform.localPosition),
-                EulerAngles = ToInfo(transform.eulerAngles),
-                LocalScale = ToInfo(transform.localScale)
-            };
+                return 0;
+            }
 
-            var components = gameObject.GetComponents<Component>();
-            var names = new List<string>(components.Length);
-            foreach (var component in components)
+            var processed = 0;
+            var start = Stopwatch.GetTimestamp();
+            var budgetTicks = budgetMilliseconds <= 0
+                ? long.MaxValue
+                : Math.Max(1L, (long)(Stopwatch.Frequency * budgetMilliseconds / 1000.0));
+
+            while (_pending.Count > 0 && processed < maxNodes)
             {
-                if (component != null)
+                ProcessOne(_pending.Dequeue());
+                processed++;
+
+                if (Stopwatch.GetTimestamp() - start >= budgetTicks)
                 {
-                    names.Add(component.GetType().FullName ?? component.GetType().Name);
+                    break;
                 }
             }
-            componentNames = names.ToArray();
+
+            return processed;
         }
 
-        return new GameObjectInfo
+        private void ProcessOne(SceneScanWorkItem item)
         {
-            InstanceId = instanceId,
-            Name = gameObject.name ?? string.Empty,
-            ActiveSelf = gameObject.activeSelf,
-            ActiveInHierarchy = gameObject.activeInHierarchy,
-            Layer = layer,
-            Tag = tag,
-            Transform = transformInfo,
-            Components = componentNames,
-            Children = children
-        };
+            try
+            {
+                var gameObject = item.GameObject;
+                if (gameObject == null)
+                {
+                    item.Target[item.Index] = UnavailableObject();
+                    return;
+                }
+
+                var instanceId = gameObject.GetInstanceID();
+                var transform = gameObject.transform;
+                var childCount = transform.childCount;
+                var children = childCount == 0
+                    ? Array.Empty<GameObjectInfo>()
+                    : new GameObjectInfo[childCount];
+
+                var transformInfo = new TransformInfo();
+                var componentNames = Array.Empty<string>();
+                var layer = 0;
+                var tag = string.Empty;
+
+                if (instanceId == _selectedInstanceId)
+                {
+                    layer = gameObject.layer;
+                    tag = ReadTag(gameObject);
+                    transformInfo = new TransformInfo
+                    {
+                        Position = ToInfo(transform.position),
+                        LocalPosition = ToInfo(transform.localPosition),
+                        EulerAngles = ToInfo(transform.eulerAngles),
+                        LocalScale = ToInfo(transform.localScale)
+                    };
+
+                    var components = gameObject.GetComponents<Component>();
+                    var names = new List<string>(components.Length);
+                    foreach (var component in components)
+                    {
+                        if (component != null)
+                        {
+                            names.Add(component.GetType().FullName ?? component.GetType().Name);
+                        }
+                    }
+                    componentNames = names.ToArray();
+                }
+
+                item.Target[item.Index] = new GameObjectInfo
+                {
+                    InstanceId = instanceId,
+                    Name = gameObject.name ?? string.Empty,
+                    ActiveSelf = gameObject.activeSelf,
+                    ActiveInHierarchy = gameObject.activeInHierarchy,
+                    Layer = layer,
+                    Tag = tag,
+                    Transform = transformInfo,
+                    Components = componentNames,
+                    Children = children
+                };
+
+                for (var childIndex = 0; childIndex < childCount; childIndex++)
+                {
+                    try
+                    {
+                        var child = transform.GetChild(childIndex);
+                        if (child == null)
+                        {
+                            children[childIndex] = UnavailableObject();
+                            continue;
+                        }
+
+                        _pending.Enqueue(new SceneScanWorkItem(child.gameObject, children, childIndex));
+                    }
+                    catch (UnityException)
+                    {
+                        children[childIndex] = UnavailableObject();
+                    }
+                }
+            }
+            catch (MissingReferenceException)
+            {
+                item.Target[item.Index] = UnavailableObject();
+            }
+            catch (UnityException)
+            {
+                item.Target[item.Index] = UnavailableObject();
+            }
+        }
     }
+
+    private readonly struct SceneScanWorkItem
+    {
+        public SceneScanWorkItem(GameObject gameObject, GameObjectInfo[] target, int index)
+        {
+            GameObject = gameObject;
+            Target = target;
+            Index = index;
+        }
+
+        public GameObject GameObject { get; }
+        public GameObjectInfo[] Target { get; }
+        public int Index { get; }
+    }
+
+    private static GameObjectInfo UnavailableObject() => new()
+    {
+        Name = "<unavailable>",
+        ActiveSelf = false,
+        ActiveInHierarchy = false
+    };
 
     private static string ReadTag(GameObject gameObject)
     {
