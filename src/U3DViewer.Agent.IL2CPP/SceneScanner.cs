@@ -8,7 +8,7 @@ namespace U3DViewer.Agent.IL2CPP;
 
 internal static class SceneScanner
 {
-    public static SceneScanSession Begin(long sequence, int selectedInstanceId)
+    public static SceneScanSession Begin(long sequence, int selectedInstanceId, HashSet<int> expandedInstanceIds)
     {
         var scenes = new SceneInfo[SceneManager.sceneCount];
         var pending = new Queue<SceneScanWorkItem>();
@@ -41,21 +41,25 @@ internal static class SceneScanner
                 Scenes = scenes
             },
             selectedInstanceId,
+            expandedInstanceIds,
             pending);
     }
 
     internal sealed class SceneScanSession
     {
         private readonly int _selectedInstanceId;
+        private readonly HashSet<int> _expandedInstanceIds;
         private readonly Queue<SceneScanWorkItem> _pending;
 
         internal SceneScanSession(
             SceneSnapshot snapshot,
             int selectedInstanceId,
+            HashSet<int> expandedInstanceIds,
             Queue<SceneScanWorkItem> pending)
         {
             Snapshot = snapshot;
             _selectedInstanceId = selectedInstanceId;
+            _expandedInstanceIds = expandedInstanceIds;
             _pending = pending;
         }
 
@@ -103,9 +107,10 @@ internal static class SceneScanner
                 var instanceId = gameObject.GetInstanceID();
                 var transform = gameObject.transform;
                 var childCount = transform.childCount;
-                var children = childCount == 0
-                    ? Array.Empty<GameObjectInfo>()
-                    : new GameObjectInfo[childCount];
+                var shouldLoadChildren = childCount > 0 && _expandedInstanceIds.Contains(instanceId);
+                var children = shouldLoadChildren
+                    ? new GameObjectInfo[childCount]
+                    : Array.Empty<GameObjectInfo>();
 
                 var transformInfo = new TransformInfo();
                 var componentNames = Array.Empty<string>();
@@ -141,12 +146,18 @@ internal static class SceneScanner
                     Name = gameObject.name ?? string.Empty,
                     ActiveSelf = gameObject.activeSelf,
                     ActiveInHierarchy = gameObject.activeInHierarchy,
+                    ChildCount = childCount,
                     Layer = layer,
                     Tag = tag,
                     Transform = transformInfo,
                     Components = componentNames,
                     Children = children
                 };
+
+                if (!shouldLoadChildren)
+                {
+                    return;
+                }
 
                 for (var childIndex = 0; childIndex < childCount; childIndex++)
                 {
@@ -192,7 +203,8 @@ internal static class SceneScanner
     {
         Name = "<unavailable>",
         ActiveSelf = false,
-        ActiveInHierarchy = false
+        ActiveInHierarchy = false,
+        ChildCount = 0
     };
 
     private static string ReadTag(GameObject gameObject)
