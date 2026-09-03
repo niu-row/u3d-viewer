@@ -158,8 +158,9 @@ internal sealed class NativeSceneHost : NativeControlHost
             if (opened == 0)
             {
                 var hresult = U3DViewer_GetScenePresenterLastError(_hostWindow);
+                var stage = DescribeInitStage(U3DViewer_GetScenePresenterInitStage(_hostWindow));
                 SetStatus(
-                    $"Could not open GPU Scene presenter (HRESULT 0x{hresult:X8}). " +
+                    $"Could not open GPU Scene presenter at {stage} (HRESULT 0x{hresult:X8}, source DXGI {target.DxgiFormat}). " +
                     $"Game GPU: {gameGpu} · Viewer GPU: {viewerGpu}");
                 return;
             }
@@ -279,6 +280,24 @@ internal sealed class NativeSceneHost : NativeControlHost
         StatusChanged?.Invoke(status);
     }
 
+    private static string DescribeInitStage(int stage) => stage switch
+    {
+        1 => "FindAdapter",
+        2 => "CreateDevice",
+        3 => "QueryDevice1",
+        4 => "OpenSharedResource",
+        5 => "QueryKeyedMutex",
+        6 => "CreateShaderResourceView",
+        7 => "CreateShaders",
+        8 => "QueryDxgiDevice",
+        9 => "GetAdapter",
+        10 => "GetFactory",
+        11 => "CreateSwapChain",
+        12 => "CreateRenderTarget",
+        13 => "Ready",
+        _ => "Unknown"
+    };
+
     private static string FormatAdapter(string? name, ulong luid)
     {
         var displayName = string.IsNullOrWhiteSpace(name) ? "unknown GPU" : name.Trim();
@@ -334,6 +353,9 @@ internal sealed class NativeSceneHost : NativeControlHost
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int U3DViewer_GetScenePresenterLastError(IntPtr window);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int U3DViewer_GetScenePresenterInitStage(IntPtr window);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern ulong U3DViewer_GetScenePresenterAdapterLuid(IntPtr window);
