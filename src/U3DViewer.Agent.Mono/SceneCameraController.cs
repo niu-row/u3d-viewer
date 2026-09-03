@@ -9,8 +9,8 @@ internal sealed class SceneCameraController : IDisposable
 {
     private const int RenderWidth = 1280;
     private const int RenderHeight = 720;
-    private const float IdleRenderInterval = 1f / 30f;
-    private const float InteractiveRenderInterval = 1f / 60f;
+    private const float IdleRenderInterval = 1f / 15f;
+    private const float InteractiveRenderInterval = 1f / 30f;
     private const float InteractiveHoldSeconds = 0.2f;
 
     private GameObject? _cameraObject;
