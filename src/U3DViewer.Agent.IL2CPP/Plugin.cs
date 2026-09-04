@@ -1,12 +1,9 @@
 using System.Diagnostics;
-using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 using U3DViewer.Protocol;
-using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace U3DViewer.Agent.IL2CPP;
 
@@ -20,8 +17,6 @@ public sealed class Plugin : BasePlugin
     private static ManualLogSource? _sharedLog;
     private static bool _bootstrapResizeNoticeLogged;
     private static bool _bootstrapRecoverNoticeLogged;
-    private static bool _srpSceneNoticeLogged;
-    private static bool _srpEnableConflictLogged;
 
     private PipeServer? _pipeServer;
     private Harmony? _sceneTransportHarmony;
@@ -31,8 +26,6 @@ public sealed class Plugin : BasePlugin
         _sharedLog = Log;
         _bootstrapResizeNoticeLogged = false;
         _bootstrapRecoverNoticeLogged = false;
-        _srpSceneNoticeLogged = false;
-        _srpEnableConflictLogged = false;
         InstallSceneTransportCompatibility();
 
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
@@ -41,9 +34,6 @@ public sealed class Plugin : BasePlugin
 
         RuntimeBehaviour.Initialize(_pipeServer, Log);
         AddComponent<RuntimeBehaviour>();
-        AddComponent<SourceCaptureEndOfFrameFallback>();
-        AddComponent<MiddenRenderPipelineAdapter>();
-        AddComponent<SceneDiagnosticsBehaviour>();
 
         Log.LogInfo($"U3D Viewer IL2CPP agent loaded. Pipe: {pipeName}");
     }
@@ -78,9 +68,8 @@ public sealed class Plugin : BasePlugin
         {
             harmony.CreateClassProcessor(typeof(SceneCommandBootstrapPatch)).Patch();
             harmony.CreateClassProcessor(typeof(SceneWriterStatusPatch)).Patch();
-            harmony.CreateClassProcessor(typeof(SrpSceneCameraRenderPatch)).Patch();
             _sceneTransportHarmony = harmony;
-            Log.LogInfo("Installed IL2CPP Scene transport compatibility patches.");
+            Log.LogInfo("Installed IL2CPP Scene first-frame transport guard.");
         }
         catch (Exception ex)
         {
@@ -93,49 +82,18 @@ public sealed class Plugin : BasePlugin
             }
 
             _sceneTransportHarmony = null;
-            Log.LogWarning($"Could not install IL2CPP Scene transport compatibility patches: {ex.Message}");
+            Log.LogWarning($"Could not install IL2CPP Scene first-frame transport guard: {ex.Message}");
         }
     }
 
     [HarmonyPatch(typeof(SceneCameraController), nameof(SceneCameraController.Apply))]
     private static class SceneCommandBootstrapPatch
     {
-        private const BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
-
-        private static readonly MethodInfo? EnsureCameraMethod =
-            typeof(SceneCameraController).GetMethod("EnsureCamera", InstancePrivate);
-        private static readonly MethodInfo? TryInitializeBridgeMethod =
-            typeof(SceneCameraController).GetMethod("TryInitializeBridge", InstancePrivate);
-        private static readonly MethodInfo? BoostInteractiveRenderMethod =
-            typeof(SceneCameraController).GetMethod("BoostInteractiveRender", InstancePrivate);
-        private static readonly FieldInfo? TransportTextureField =
-            typeof(SceneCameraController).GetField("_transportTexture", InstancePrivate);
-        private static readonly FieldInfo? RenderGenerationField =
-            typeof(SceneCameraController).GetField("_renderGeneration", InstancePrivate);
-        private static readonly FieldInfo? BridgeReadyField =
-            typeof(SceneCameraController).GetField("_bridgeReady", InstancePrivate);
-        private static readonly FieldInfo? RenderEventField =
-            typeof(SceneCameraController).GetField("_renderEvent", InstancePrivate);
-        private static readonly FieldInfo? SharedNameField =
-            typeof(SceneCameraController).GetField("_sharedName", InstancePrivate);
-
         [HarmonyPrefix]
         private static bool StabilizeFirstSharedFrame(SceneCameraController __instance, ref ViewerCommand command)
         {
             if (command.Kind != ViewerCommandKind.CameraStreamSettings &&
                 command.Kind != ViewerCommandKind.CameraRecover)
-            {
-                return true;
-            }
-
-            if (command.Kind == ViewerCommandKind.CameraRecover &&
-                RenderPipelineManager.currentPipeline is not null)
-            {
-                RebindExistingFreeTransport(__instance);
-                return false;
-            }
-
-            if (!SceneTransportCoordinator.IsOwner(SceneTransportOwner.FreeCamera))
             {
                 return true;
             }
@@ -208,84 +166,6 @@ public sealed class Plugin : BasePlugin
 
             return true;
         }
-
-        private static void RebindExistingFreeTransport(SceneCameraController instance)
-        {
-            try
-            {
-                if (EnsureCameraMethod is null ||
-                    TryInitializeBridgeMethod is null ||
-                    TransportTextureField is null ||
-                    RenderGenerationField is null ||
-                    BridgeReadyField is null ||
-                    RenderEventField is null)
-                {
-                    _sharedLog?.LogWarning("Could not rebind free Scene transport: required SceneCameraController members were not resolved.");
-                    return;
-                }
-
-                var beforeGeneration = RenderGenerationField.GetValue(instance) is int beforeValue ? beforeValue : 0;
-                var beforeShared = SharedNameField?.GetValue(instance) as string ?? string.Empty;
-                _sharedLog?.LogInfo(
-                    $"[SceneDiag] Free transport rebind begin: owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, generation={beforeGeneration}, shared={beforeShared}.");
-
-                EnsureCameraMethod.Invoke(instance, null);
-                if (TransportTextureField.GetValue(instance) is not RenderTexture transportTexture)
-                {
-                    _sharedLog?.LogWarning("Could not rebind free Scene transport: transport RenderTexture is unavailable.");
-                    return;
-                }
-
-                var nativeTexture = transportTexture.GetNativeTexturePtr();
-                if (nativeTexture == IntPtr.Zero)
-                {
-                    _sharedLog?.LogWarning("Could not rebind free Scene transport: transport RenderTexture has no native D3D11 texture.");
-                    return;
-                }
-
-                _sharedLog?.LogInfo(
-                    $"[SceneDiag] Free transport before reset: rt={transportTexture.name} {transportTexture.width}x{transportTexture.height}, created={transportTexture.IsCreated()}, nativePtr=0x{nativeTexture.ToInt64():X}.");
-
-                NativeBridge.U3DViewer_Reset();
-                SceneTransportCoordinator.Observe(SceneTransportOwner.FreeCamera);
-                BridgeReadyField.SetValue(instance, false);
-                RenderEventField.SetValue(instance, IntPtr.Zero);
-
-                var generation = RenderGenerationField.GetValue(instance) is int value ? value : 0;
-                RenderGenerationField.SetValue(instance, generation + 1);
-                TryInitializeBridgeMethod.Invoke(instance, null);
-                BoostInteractiveRenderMethod?.Invoke(instance, null);
-
-                var bridgeReady = BridgeReadyField.GetValue(instance) is bool ready && ready;
-                var sharedName = SharedNameField?.GetValue(instance) as string ?? string.Empty;
-                var writerReady = 0;
-                var hresult = 0;
-                try
-                {
-                    writerReady = string.IsNullOrWhiteSpace(sharedName)
-                        ? 0
-                        : NativeBridge.U3DViewer_IsSceneWriterReady(sharedName);
-                    hresult = NativeBridge.U3DViewer_GetLastError();
-                }
-                catch
-                {
-                }
-
-                _sharedLog?.LogInfo(
-                    bridgeReady
-                        ? $"Rebound existing free Scene transport without recreating RenderTextures. Shared target: {sharedName}. owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, writerReady={writerReady}, HRESULT=0x{hresult:X8}."
-                        : $"Rebound existing free Scene transport, but NativeBridge did not become ready. owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, HRESULT=0x{hresult:X8}.");
-            }
-            catch (TargetInvocationException ex)
-            {
-                _sharedLog?.LogWarning(
-                    $"Could not rebind existing free Scene transport: {ex.InnerException ?? ex}");
-            }
-            catch (Exception ex)
-            {
-                _sharedLog?.LogWarning($"Could not rebind existing free Scene transport: {ex}");
-            }
-        }
     }
 
     [HarmonyPatch(typeof(SceneCameraController), nameof(SceneCameraController.GetRenderTargetInfo))]
@@ -312,77 +192,6 @@ public sealed class Plugin : BasePlugin
             }
             catch
             {
-            }
-        }
-    }
-
-    [HarmonyPatch(typeof(SceneCameraController), nameof(SceneCameraController.TickRender))]
-    private static class SrpSceneCameraRenderPatch
-    {
-        private const BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
-
-        private static readonly MethodInfo? EnsureCameraMethod =
-            typeof(SceneCameraController).GetMethod("EnsureCamera", InstancePrivate);
-        private static readonly MethodInfo? RefreshSourceCameraMethod =
-            typeof(SceneCameraController).GetMethod("RefreshSourceCameraIfNeeded", InstancePrivate);
-        private static readonly MethodInfo? ApplyFollowTransformMethod =
-            typeof(SceneCameraController).GetMethod("ApplyFollowTransform", InstancePrivate);
-        private static readonly MethodInfo? ResetSceneFpsMethod =
-            typeof(SceneCameraController).GetMethod("ResetSceneFps", InstancePrivate);
-        private static readonly FieldInfo? CameraField =
-            typeof(SceneCameraController).GetField("_camera", InstancePrivate);
-        private static readonly FieldInfo? ViewerVisibleField =
-            typeof(SceneCameraController).GetField("_viewerVisible", InstancePrivate);
-
-        [HarmonyPrefix]
-        private static bool RenderThroughActivePipeline(SceneCameraController __instance)
-        {
-            if (RenderPipelineManager.currentPipeline is null)
-            {
-                return true;
-            }
-
-            try
-            {
-                EnsureCameraMethod?.Invoke(__instance, null);
-                var now = Time.unscaledTime;
-                RefreshSourceCameraMethod?.Invoke(__instance, new object[] { now });
-
-                var camera = CameraField?.GetValue(__instance) as Camera;
-                var viewerVisible = ViewerVisibleField?.GetValue(__instance) is bool visible && visible;
-                if (camera is not null)
-                {
-                    if (viewerVisible && !camera.enabled && !_srpEnableConflictLogged)
-                    {
-                        _srpEnableConflictLogged = true;
-                        _sharedLog?.LogWarning(
-                            "[SceneDiag] SRP TickRender is re-enabling __U3DViewerCamera after it was disabled. If the isolated URP path disables it later in the frame, enabled state is oscillating and may explain game-window flicker.");
-                    }
-                    camera.enabled = viewerVisible;
-                }
-
-                if (!viewerVisible)
-                {
-                    ResetSceneFpsMethod?.Invoke(__instance, new object[] { now });
-                    return false;
-                }
-
-                ApplyFollowTransformMethod?.Invoke(__instance, new object[] { false });
-                if (!_srpSceneNoticeLogged)
-                {
-                    _srpSceneNoticeLogged = true;
-                    var pipeline = RenderPipelineManager.currentPipeline;
-                    var pipelineName = pipeline?.GetType().FullName ?? pipeline?.GetType().Name ?? "unknown SRP";
-                    _sharedLog?.LogInfo(
-                        $"Free Scene Camera is rendered by the active RenderPipeline ({pipelineName}); NativeBridge publication occurs at end-of-frame.");
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                _sharedLog?.LogWarning($"Could not route free Scene Camera through SRP: {ex}");
-                return true;
             }
         }
     }

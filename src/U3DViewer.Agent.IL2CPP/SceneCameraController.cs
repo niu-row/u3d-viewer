@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.Diagnostics;
 using U3DViewer.Protocol;
 using UnityEngine;
@@ -14,7 +13,6 @@ internal sealed class SceneCameraController : IDisposable
     private const float DefaultInteractiveFps = 30f;
     private const float InteractiveHoldSeconds = 0.2f;
     private const float FollowSourceLookupInterval = 1f;
-    private const float SourceCameraRefreshInterval = 1f;
     private const float DefaultPerspectiveFov = 60f;
     private const float MinPerspectiveNear = 0.001f;
     private const float MinPerspectiveFov = 1f;
@@ -31,7 +29,6 @@ internal sealed class SceneCameraController : IDisposable
     private Camera? _camera;
     private Camera? _followSourceCamera;
     private RenderTexture? _renderTexture;
-    private RenderTexture? _transportTexture;
     private float _moveSpeed = 10f;
     private float _idleFps = DefaultIdleFps;
     private float _interactiveFps = DefaultInteractiveFps;
@@ -41,7 +38,6 @@ internal sealed class SceneCameraController : IDisposable
     private float _nextRenderAt;
     private float _interactiveUntil;
     private float _nextFollowSourceLookupAt;
-    private float _nextSourceCameraRefreshAt;
     private bool _followPosition;
     private bool _followRotation;
     private bool _viewerVisible = true;
@@ -51,9 +47,6 @@ internal sealed class SceneCameraController : IDisposable
     private int _dxgiFormat;
     private ulong _adapterLuid;
     private int _nativeBridgeAbiVersion;
-    private int _selectedSourceCameraInstanceId;
-    private int _effectiveSourceCameraInstanceId;
-    private string _effectiveSourceCameraName = string.Empty;
     private string _adapterName = string.Empty;
     private string _sharedName = string.Empty;
     private string _sourceProjectionInfo = "Source Camera: unavailable";
@@ -120,14 +113,6 @@ internal sealed class SceneCameraController : IDisposable
                 ApplyFollowTransform(forceLookup: true);
                 BoostInteractiveRender();
                 break;
-            case ViewerCommandKind.CameraSource:
-                _selectedSourceCameraInstanceId = command.InstanceId;
-                _followSourceCamera = null;
-                _nextFollowSourceLookupAt = 0f;
-                _nextSourceCameraRefreshAt = 0f;
-                CopyFromGameCamera();
-                BoostInteractiveRender();
-                break;
             case ViewerCommandKind.CameraReset:
                 CopyFromGameCamera();
                 BoostInteractiveRender();
@@ -163,14 +148,13 @@ internal sealed class SceneCameraController : IDisposable
     {
         EnsureCamera();
         var now = Time.unscaledTime;
-        RefreshSourceCameraIfNeeded(now);
         if (!_viewerVisible)
         {
             ResetSceneFps(now);
             return;
         }
 
-        if (!_bridgeReady || _camera is null || _renderTexture is null || _transportTexture is null || now < _nextRenderAt)
+        if (!_bridgeReady || _camera is null || now < _nextRenderAt)
         {
             return;
         }
@@ -184,7 +168,6 @@ internal sealed class SceneCameraController : IDisposable
         try
         {
             _camera.Render();
-            Graphics.Blit(_renderTexture, _transportTexture);
             GL.IssuePluginEvent(_renderEvent, _copyEventId);
             RecordRenderTiming(ElapsedMilliseconds(started));
             RecordRenderFrame(now);
@@ -224,10 +207,6 @@ internal sealed class SceneCameraController : IDisposable
             MoveSpeed = _moveSpeed,
             IdleFps = _idleFps,
             InteractiveFps = _interactiveFps,
-            Cameras = BuildCameraList(),
-            SelectedCameraInstanceId = _selectedSourceCameraInstanceId,
-            SourceCameraInstanceId = _effectiveSourceCameraInstanceId,
-            SourceCameraName = _effectiveSourceCameraName,
             Status = $"{_renderStatus} {_sourceProjectionInfo} -> {projection}."
         };
     }
@@ -257,7 +236,7 @@ internal sealed class SceneCameraController : IDisposable
         _camera.farClipPlane = DefaultPerspectiveFar;
         _camera.fieldOfView = DefaultPerspectiveFov;
 
-        CreateRenderTextures(_renderWidth, _renderHeight);
+        CreateRenderTexture(_renderWidth, _renderHeight);
         CopyFromGameCamera();
         TryInitializeBridge();
     }
@@ -298,7 +277,7 @@ internal sealed class SceneCameraController : IDisposable
 
         try
         {
-            SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.FreeCamera);
+            NativeBridge.U3DViewer_Reset();
         }
         catch
         {
@@ -306,54 +285,42 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _camera.targetTexture = null;
-        ReleaseRenderTextures();
+        ReleaseRenderTexture();
         _renderWidth = width;
         _renderHeight = height;
         _renderGeneration++;
-        CreateRenderTextures(width, height);
+        CreateRenderTexture(width, height);
         TryInitializeBridge();
     }
 
-    private void CreateRenderTextures(int width, int height)
+    private void CreateRenderTexture(int width, int height)
     {
         _renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
         {
             name = "__U3DViewerRenderTexture"
         };
         _renderTexture.Create();
-
-        _transportTexture = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32)
-        {
-            name = "__U3DViewerTransportTexture"
-        };
-        _transportTexture.Create();
-
         if (_camera is not null)
         {
             _camera.targetTexture = _renderTexture;
         }
     }
 
-    private void ReleaseRenderTextures()
+    private void ReleaseRenderTexture()
     {
-        if (_renderTexture is not null)
+        if (_renderTexture is null)
         {
-            _renderTexture.Release();
-            UnityEngine.Object.Destroy(_renderTexture);
-            _renderTexture = null;
+            return;
         }
 
-        if (_transportTexture is not null)
-        {
-            _transportTexture.Release();
-            UnityEngine.Object.Destroy(_transportTexture);
-            _transportTexture = null;
-        }
+        _renderTexture.Release();
+        UnityEngine.Object.Destroy(_renderTexture);
+        _renderTexture = null;
     }
 
     private void TryInitializeBridge()
     {
-        if (_transportTexture is null)
+        if (_renderTexture is null)
         {
             return;
         }
@@ -375,16 +342,16 @@ internal sealed class SceneCameraController : IDisposable
             }
 
             _sharedName = $"U3DViewer.Scene.{Process.GetCurrentProcess().Id}.{_renderGeneration}";
-            var nativeTexture = _transportTexture.GetNativeTexturePtr();
+            var nativeTexture = _renderTexture.GetNativeTexturePtr();
             if (nativeTexture == IntPtr.Zero)
             {
-                _renderStatus = "Transport RenderTexture returned a null native texture pointer.";
+                _renderStatus = "RenderTexture returned a null native texture pointer.";
                 return;
             }
 
             if (NativeBridge.U3DViewer_SetSourceTexture(nativeTexture, _sharedName) == 0)
             {
-                _renderStatus = $"NativeBridge rejected the transport RenderTexture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
+                _renderStatus = $"NativeBridge rejected the RenderTexture (HRESULT 0x{NativeBridge.U3DViewer_GetLastError():X8}).";
                 return;
             }
 
@@ -395,7 +362,7 @@ internal sealed class SceneCameraController : IDisposable
             _adapterName = SystemInfo.graphicsDeviceName ?? string.Empty;
             _bridgeReady = _renderEvent != IntPtr.Zero;
             _renderStatus = _bridgeReady
-                ? $"D3D11 shared Scene transport target is ready on {DisplayAdapterName(_adapterName)}."
+                ? $"D3D11 shared Scene render target is ready on {DisplayAdapterName(_adapterName)}."
                 : "NativeBridge did not return a render event callback.";
         }
         catch (DllNotFoundException)
@@ -450,22 +417,6 @@ internal sealed class SceneCameraController : IDisposable
         _sceneFpsWindowFrames = 0;
     }
 
-    private void RefreshSourceCameraIfNeeded(float now)
-    {
-        if (now < _nextSourceCameraRefreshAt)
-        {
-            return;
-        }
-
-        _nextSourceCameraRefreshAt = now + SourceCameraRefreshInterval;
-        var source = ResolveSourceCamera();
-        var instanceId = source is null ? 0 : source.GetInstanceID();
-        if (instanceId != _effectiveSourceCameraInstanceId)
-        {
-            CopyFromGameCamera();
-        }
-    }
-
     private void ApplyFollowTransform(bool forceLookup = false)
     {
         var camera = _camera;
@@ -478,7 +429,8 @@ internal sealed class SceneCameraController : IDisposable
         if (forceLookup || _followSourceCamera is null || now >= _nextFollowSourceLookupAt)
         {
             _nextFollowSourceLookupAt = now + FollowSourceLookupInterval;
-            _followSourceCamera = ResolveSourceCamera();
+            var source = Camera.main;
+            _followSourceCamera = source is null || source == camera ? null : source;
         }
 
         var followSource = _followSourceCamera;
@@ -497,96 +449,6 @@ internal sealed class SceneCameraController : IDisposable
         {
             transform.rotation = sourceTransform.rotation;
         }
-    }
-
-    private Camera? ResolveSourceCamera()
-    {
-        var cameras = Camera.allCameras;
-        if (_selectedSourceCameraInstanceId != 0)
-        {
-            for (var i = 0; i < cameras.Length; i++)
-            {
-                var candidate = cameras[i];
-                if (IsUsableSourceCamera(candidate) && candidate.GetInstanceID() == _selectedSourceCameraInstanceId)
-                {
-                    return candidate;
-                }
-            }
-        }
-
-        var main = Camera.main;
-        if (IsUsableSourceCamera(main))
-        {
-            return main;
-        }
-
-        Camera? bestScreenCamera = null;
-        Camera? bestAnyCamera = null;
-        for (var i = 0; i < cameras.Length; i++)
-        {
-            var candidate = cameras[i];
-            if (!IsUsableSourceCamera(candidate))
-            {
-                continue;
-            }
-
-            if (bestAnyCamera is null || candidate.depth > bestAnyCamera.depth)
-            {
-                bestAnyCamera = candidate;
-            }
-
-            if (candidate.targetTexture is null &&
-                (bestScreenCamera is null || candidate.depth > bestScreenCamera.depth))
-            {
-                bestScreenCamera = candidate;
-            }
-        }
-
-        return bestScreenCamera ?? bestAnyCamera;
-    }
-
-    private bool IsUsableSourceCamera(Camera? candidate) =>
-        candidate is not null && candidate != _camera && candidate.gameObject.activeInHierarchy;
-
-    private CameraInfo[] BuildCameraList()
-    {
-        var result = new List<CameraInfo>();
-        var cameras = Camera.allCameras;
-        for (var i = 0; i < cameras.Length; i++)
-        {
-            var candidate = cameras[i];
-            if (!IsUsableSourceCamera(candidate))
-            {
-                continue;
-            }
-
-            result.Add(new CameraInfo
-            {
-                InstanceId = candidate.GetInstanceID(),
-                Name = candidate.name ?? string.Empty,
-                Depth = candidate.depth,
-                Enabled = candidate.enabled,
-                ActiveInHierarchy = candidate.gameObject.activeInHierarchy,
-                HasTargetTexture = candidate.targetTexture is not null,
-                TargetDisplay = candidate.targetDisplay,
-                Orthographic = candidate.orthographic
-            });
-        }
-
-        result.Sort((left, right) =>
-        {
-            var screenCompare = left.HasTargetTexture.CompareTo(right.HasTargetTexture);
-            if (screenCompare != 0)
-            {
-                return screenCompare;
-            }
-
-            var depthCompare = right.Depth.CompareTo(left.Depth);
-            return depthCompare != 0
-                ? depthCompare
-                : string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
-        });
-        return result.ToArray();
     }
 
     private static double ElapsedMilliseconds(long started) =>
@@ -610,16 +472,12 @@ internal sealed class SceneCameraController : IDisposable
             return;
         }
 
-        var source = ResolveSourceCamera();
+        var source = Camera.main;
         if (source is null || source == camera)
         {
             _followSourceCamera = null;
-            _effectiveSourceCameraInstanceId = 0;
-            _effectiveSourceCameraName = string.Empty;
             _nextFollowSourceLookupAt = 0f;
-            _sourceProjectionInfo = _selectedSourceCameraInstanceId == 0
-                ? "Source Camera: unavailable"
-                : $"Selected Camera {_selectedSourceCameraInstanceId}: unavailable; automatic fallback also unavailable";
+            _sourceProjectionInfo = "Source Camera: unavailable";
             _preferredOrthographicSize = 5f;
             camera.transform.position = new Vector3(0f, 2f, -5f);
             camera.transform.rotation = Quaternion.identity;
@@ -633,26 +491,23 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _followSourceCamera = source;
-        _effectiveSourceCameraInstanceId = source.GetInstanceID();
-        _effectiveSourceCameraName = source.name ?? string.Empty;
         _nextFollowSourceLookupAt = Time.unscaledTime + FollowSourceLookupInterval;
-
-        var viewerTarget = _renderTexture;
-        camera.CopyFrom(source);
-        camera.enabled = false;
-        camera.targetTexture = viewerTarget;
         camera.transform.position = source.transform.position;
         camera.transform.rotation = source.transform.rotation;
+        camera.clearFlags = source.clearFlags;
+        camera.backgroundColor = source.backgroundColor;
+        camera.cullingMask = source.cullingMask;
 
         _preferredOrthographicSize = SanitizeOrthographicSize(source.orthographicSize);
         camera.orthographicSize = _preferredOrthographicSize;
 
         if (source.orthographic)
         {
-            camera.nearClipPlane = source.nearClipPlane;
+            camera.fieldOfView = DefaultPerspectiveFov;
+            camera.nearClipPlane = MinPerspectiveNear;
             camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
             _sourceProjectionInfo =
-                $"Source {source.name} [id {_effectiveSourceCameraInstanceId}] Orthographic size={source.orthographicSize:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+                $"Source {source.name} Orthographic size={source.orthographicSize:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
         }
         else
         {
@@ -660,8 +515,10 @@ internal sealed class SceneCameraController : IDisposable
             camera.nearClipPlane = SanitizeNear(source.nearClipPlane);
             camera.farClipPlane = SanitizeFar(source.farClipPlane, camera.nearClipPlane);
             _sourceProjectionInfo =
-                $"Source {source.name} [id {_effectiveSourceCameraInstanceId}] Perspective FOV={source.fieldOfView:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
+                $"Source {source.name} Perspective FOV={source.fieldOfView:0.###}, near={source.nearClipPlane:0.###}, far={source.farClipPlane:0.###}";
         }
+
+        camera.orthographic = false;
     }
 
     private void ApplyProjection(Camera camera, bool orthographic)
@@ -751,22 +608,7 @@ internal sealed class SceneCameraController : IDisposable
         for (var sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
         {
             var scene = SceneManager.GetSceneAt(sceneIndex);
-            if (!scene.isLoaded)
-            {
-                continue;
-            }
-
-            GameObject[] roots;
-            try
-            {
-                roots = scene.GetRootGameObjects();
-            }
-            catch
-            {
-                continue;
-            }
-
-            foreach (var root in roots)
+            foreach (var root in scene.GetRootGameObjects())
             {
                 var match = FindGameObject(root, instanceId);
                 if (match is not null)
@@ -803,7 +645,7 @@ internal sealed class SceneCameraController : IDisposable
     {
         try
         {
-            SceneTransportCoordinator.ResetIfOwner(SceneTransportOwner.FreeCamera);
+            NativeBridge.U3DViewer_Reset();
         }
         catch
         {
@@ -816,7 +658,7 @@ internal sealed class SceneCameraController : IDisposable
         }
 
         _followSourceCamera = null;
-        ReleaseRenderTextures();
+        ReleaseRenderTexture();
 
         if (_cameraObject is not null)
         {

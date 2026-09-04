@@ -37,20 +37,16 @@ internal sealed class SceneCullingController
             return;
         }
 
-        var camera = FindViewerCamera();
-        if (camera is not null)
+        // Main Camera mode intentionally follows scene/camera changes, but only at snapshot
+        // cadence rather than paying for Camera.main lookup on every rendered Scene frame.
+        if (_mode == SceneCullingMode.MainCamera)
         {
-            camera.cullingMask = _mode == SceneCullingMode.MainCamera
-                ? ResolveSourceCameraMask(target.SourceCameraInstanceId)
-                : ResolveMask();
+            ApplyCurrentMode();
         }
 
+        var camera = FindViewerCamera();
         target.CullingMode = _mode;
-        target.CullingMask = camera is null
-            ? (_mode == SceneCullingMode.MainCamera
-                ? ResolveSourceCameraMask(target.SourceCameraInstanceId)
-                : ResolveMask())
-            : camera.cullingMask;
+        target.CullingMask = camera is null ? ResolveMask() : camera.cullingMask;
         target.LayerNames = _layerNames;
     }
 
@@ -71,26 +67,6 @@ internal sealed class SceneCullingController
             SceneCullingMode.Manual => _manualMask,
             _ => ResolveMainCameraMask()
         };
-    }
-
-    private int ResolveSourceCameraMask(int sourceCameraInstanceId)
-    {
-        if (sourceCameraInstanceId != 0)
-        {
-            var cameras = Camera.allCameras;
-            for (var index = 0; index < cameras.Length; index++)
-            {
-                var source = cameras[index];
-                if (source is not null &&
-                    source != FindViewerCamera() &&
-                    source.GetInstanceID() == sourceCameraInstanceId)
-                {
-                    return source.cullingMask;
-                }
-            }
-        }
-
-        return ResolveMainCameraMask();
     }
 
     private int ResolveMainCameraMask()

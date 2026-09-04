@@ -17,7 +17,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static PipeServer? _pipeServer;
     private static ManualLogSource? _log;
     private static SceneCameraController? _sceneCamera;
-    private static SourceCameraCaptureController? _sourceCapture;
     private static SceneCullingController? _sceneCulling;
     private static SceneScanner.SceneScanSession? _sceneScan;
     private static Task<SerializedSnapshot>? _snapshotSerialization;
@@ -41,7 +40,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     private static double _gameFps;
     private static bool _originalRunInBackground;
     private static bool _runInBackgroundCaptured;
-    private static ViewerCommand _lastStreamSettings;
 
     public RuntimeBehaviour(IntPtr pointer) : base(pointer)
     {
@@ -56,7 +54,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _pipeServer = pipeServer;
         _log = log;
         _sceneCamera = new SceneCameraController();
-        _sourceCapture = new SourceCameraCaptureController();
         _sceneCulling = new SceneCullingController();
         _sceneScan = null;
         _snapshotSerialization = null;
@@ -66,12 +63,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         _sequence = 0;
         _selectedInstanceId = 0;
         _interactiveHierarchyRefresh = false;
-        _lastStreamSettings = new ViewerCommand(
-            ViewerCommandKind.CameraStreamSettings,
-            15f,
-            30f,
-            1280f,
-            720f);
         ResetPerformanceMetrics();
         _log.LogInfo("Background execution forced on for U3DViewer mode.");
     }
@@ -80,8 +71,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
     {
         RestoreBackgroundExecution();
         ResetSnapshotState();
-        _sourceCapture?.Dispose();
-        _sourceCapture = null;
         _sceneCulling = null;
         _pipeServer = null;
         _log = null;
@@ -92,12 +81,6 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         var pipeServer = _pipeServer;
         if (pipeServer is null || !pipeServer.IsViewerConnected)
         {
-            if (_sourceCapture?.Enabled == true)
-            {
-                _sourceCapture.SetEnabled(false);
-                RestoreFreeCameraTransport();
-            }
-
             ResetSnapshotState();
             ExpandedInstanceIds.Clear();
             ExpandedSceneKeys.Clear();
@@ -152,45 +135,13 @@ public sealed class RuntimeBehaviour : MonoBehaviour
                         RestartHierarchyScan();
                         continue;
                     }
-                    case ViewerCommandKind.CameraSourceCapture:
-                        if (command.Flag)
-                        {
-                            _sourceCapture?.Apply(_lastStreamSettings);
-                            _sourceCapture?.SetEnabled(true);
-                            _log?.LogInfo("Direct source Camera output capture enabled for Scene View.");
-                        }
-                        else
-                        {
-                            _sourceCapture?.SetEnabled(false);
-                            RestoreFreeCameraTransport();
-                            _log?.LogInfo("Direct source Camera output capture disabled; free Scene Camera restored.");
-                        }
-                        _interactiveHierarchyRefresh = true;
-                        RestartHierarchyScan();
-                        flushSceneTransport = true;
-                        continue;
                     default:
-                        if (command.Kind == ViewerCommandKind.CameraStreamSettings)
-                        {
-                            _lastStreamSettings = command;
-                        }
-
-                        _sourceCapture?.Apply(command);
-
-                        var captureEnabled = _sourceCapture?.Enabled == true;
-                        var commandWouldStealBridge =
-                            command.Kind == ViewerCommandKind.CameraStreamSettings ||
-                            command.Kind == ViewerCommandKind.CameraRecover;
-                        if (!captureEnabled || !commandWouldStealBridge)
-                        {
-                            _sceneCamera?.Apply(command);
-                        }
-
-                        if (!captureEnabled && command.Kind == ViewerCommandKind.CameraCullingMask)
+                        _sceneCamera?.Apply(command);
+                        if (command.Kind == ViewerCommandKind.CameraCullingMask)
                         {
                             _sceneCulling?.Apply(command);
                         }
-                        else if (!captureEnabled && command.Kind == ViewerCommandKind.CameraReset)
+                        else if (command.Kind == ViewerCommandKind.CameraReset)
                         {
                             _sceneCulling?.Reapply();
                         }
@@ -218,16 +169,8 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             }
         }
 
-        if (_sourceCapture?.Enabled == true)
-        {
-            _sourceCapture.Tick();
-        }
-        else
-        {
-            _sceneCamera?.TickRender();
-        }
-
-        if (flushSceneTransport && _sourceCapture?.Enabled != true)
+        _sceneCamera?.TickRender();
+        if (flushSceneTransport)
         {
             try
             {
@@ -295,24 +238,11 @@ public sealed class RuntimeBehaviour : MonoBehaviour
             RecordHierarchyScan(_currentScanNodes, _currentScanMs);
 
             var snapshot = _sceneScan.Snapshot;
-            var sourceCaptureEnabled = _sourceCapture?.Enabled == true;
-            var renderTarget = sourceCaptureEnabled
-                ? _sourceCapture?.GetRenderTargetInfo()
-                : _sceneCamera?.GetRenderTargetInfo();
-            if (!sourceCaptureEnabled)
-            {
-                _sceneCulling?.Populate(renderTarget);
-            }
+            var renderTarget = _sceneCamera?.GetRenderTargetInfo();
+            _sceneCulling?.Populate(renderTarget);
             snapshot.RenderTarget = renderTarget;
             snapshot.Performance = BuildPerformanceInfo();
-            if (sourceCaptureEnabled)
-            {
-                _sourceCapture?.PopulatePerformance(snapshot.Performance);
-            }
-            else
-            {
-                _sceneCamera?.PopulatePerformance(snapshot.Performance);
-            }
+            _sceneCamera?.PopulatePerformance(snapshot.Performance);
             _sceneScan = null;
             _nextSnapshotAt = Time.unscaledTime + SnapshotRestartDelay;
             _interactiveHierarchyRefresh = false;
@@ -339,30 +269,9 @@ public sealed class RuntimeBehaviour : MonoBehaviour
         ExpandedInstanceIds.Clear();
         ExpandedSceneKeys.Clear();
         _interactiveHierarchyRefresh = false;
-        _sourceCapture?.Dispose();
-        _sourceCapture = null;
         _sceneCulling = null;
         _sceneCamera?.Dispose();
         _sceneCamera = null;
-    }
-
-    private static void RestoreFreeCameraTransport()
-    {
-        var sceneCamera = _sceneCamera;
-        if (sceneCamera is null)
-        {
-            return;
-        }
-
-        try
-        {
-            sceneCamera.Apply(new ViewerCommand(ViewerCommandKind.CameraRecover));
-            sceneCamera.Apply(_lastStreamSettings);
-        }
-        catch (Exception ex)
-        {
-            _log?.LogWarning($"Failed to restore free Scene Camera transport: {ex.Message}");
-        }
     }
 
     private static void PublishCompletedSerialization(PipeServer pipeServer)
