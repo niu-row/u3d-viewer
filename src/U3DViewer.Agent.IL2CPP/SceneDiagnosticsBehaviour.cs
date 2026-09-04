@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using BepInEx.Logging;
@@ -18,6 +19,7 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
     private const float SummaryIntervalSeconds = 2.5f;
     private const BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
     private const BindingFlags StaticPrivate = BindingFlags.Static | BindingFlags.NonPublic;
+    private const int MaxMemberEntriesPerType = 96;
 
     private static readonly FieldInfo? SceneCameraField =
         typeof(RuntimeBehaviour).GetField("_sceneCamera", StaticPrivate);
@@ -31,6 +33,8 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         typeof(SceneCameraController).GetField("_effectiveSourceCameraInstanceId", InstancePrivate);
     private static readonly FieldInfo? FreeRenderStatusField =
         typeof(SceneCameraController).GetField("_renderStatus", InstancePrivate);
+
+    private static readonly HashSet<string> LoggedIl2CppMemberTypes = new HashSet<string>(StringComparer.Ordinal);
 
     private static ManualLogSource? _sharedLog;
     private Harmony? _guardHarmony;
@@ -160,6 +164,10 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
 
         _lastPipeline = state;
         _sharedLog?.LogInfo($"[SceneDiag] Pipeline: {state}");
+        if (current is not null)
+        {
+            LogIl2CppMembersOnce(current, force: true);
+        }
     }
 
     private void LogCameraInventory(bool force)
@@ -172,6 +180,7 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
 
         _lastInventory = inventory;
         _sharedLog?.LogInfo($"[SceneDiag] Cameras: {inventory}");
+        LogCustomCameraComponentMembers();
     }
 
     private static string BuildCameraInventory()
@@ -253,6 +262,135 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         catch (Exception ex)
         {
             return $"<components error:{ex.GetType().Name}:{ex.Message}>";
+        }
+    }
+
+    private static void LogCustomCameraComponentMembers()
+    {
+        try
+        {
+            var cameras = Camera.allCameras ?? Array.Empty<Camera>();
+            for (var cameraIndex = 0; cameraIndex < cameras.Length; cameraIndex++)
+            {
+                var camera = cameras[cameraIndex];
+                if (camera is null)
+                {
+                    continue;
+                }
+
+                var components = camera.gameObject.GetComponents<Component>();
+                for (var componentIndex = 0; componentIndex < components.Length; componentIndex++)
+                {
+                    var component = components[componentIndex];
+                    if (component is null || !ShouldLogCustomMembers(component))
+                    {
+                        continue;
+                    }
+
+                    LogIl2CppMembersOnce(component, force: false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _sharedLog?.LogWarning($"[SceneDiag] Could not inspect custom Camera component members: {ex}");
+        }
+    }
+
+    private static bool ShouldLogCustomMembers(Il2CppSystem.Object value)
+    {
+        try
+        {
+            var type = value.GetIl2CppType();
+            if (type is null)
+            {
+                return false;
+            }
+
+            var assemblyName = type.Assembly?.FullName ?? string.Empty;
+            if (assemblyName.IndexOf("Assembly-CSharp", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            var name = type.FullName ?? type.Name ?? string.Empty;
+            return
+                name.IndexOf("Midden", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Camera", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Cull", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void LogIl2CppMembersOnce(Il2CppSystem.Object value, bool force)
+    {
+        try
+        {
+            var type = value.GetIl2CppType();
+            if (type is null)
+            {
+                return;
+            }
+
+            var typeName = type.FullName ?? type.Name ?? "<unnamed>";
+            if (!force && !LoggedIl2CppMemberTypes.Add(typeName))
+            {
+                return;
+            }
+            LoggedIl2CppMemberTypes.Add(typeName);
+
+            var flags =
+                Il2CppSystem.Reflection.BindingFlags.DeclaredOnly |
+                Il2CppSystem.Reflection.BindingFlags.Public |
+                Il2CppSystem.Reflection.BindingFlags.NonPublic |
+                Il2CppSystem.Reflection.BindingFlags.Instance |
+                Il2CppSystem.Reflection.BindingFlags.Static;
+
+            var methods = new StringBuilder();
+            var methodCount = 0;
+            foreach (var method in type.GetMethods(flags))
+            {
+                if (methodCount >= MaxMemberEntriesPerType)
+                {
+                    methods.Append(" | <truncated>");
+                    break;
+                }
+
+                if (methods.Length > 0)
+                {
+                    methods.Append(" | ");
+                }
+                methods.Append(method?.ToString() ?? "<null-method>");
+                methodCount++;
+            }
+
+            var fields = new StringBuilder();
+            var fieldCount = 0;
+            foreach (var field in type.GetFields(flags))
+            {
+                if (fieldCount >= MaxMemberEntriesPerType)
+                {
+                    fields.Append(" | <truncated>");
+                    break;
+                }
+
+                if (fields.Length > 0)
+                {
+                    fields.Append(" | ");
+                }
+                fields.Append(field?.ToString() ?? "<null-field>");
+                fieldCount++;
+            }
+
+            _sharedLog?.LogInfo(
+                $"[SceneDiag] IL2CPP members {typeName}: methods=[{methods}] fields=[{fields}]");
+        }
+        catch (Exception ex)
+        {
+            _sharedLog?.LogWarning($"[SceneDiag] IL2CPP member inspection failed: {ex}");
         }
     }
 
@@ -403,6 +541,14 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         try
         {
             _guardHarmony?.UnpatchSelf();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            LoggedIl2CppMemberTypes.Clear();
         }
         catch
         {
