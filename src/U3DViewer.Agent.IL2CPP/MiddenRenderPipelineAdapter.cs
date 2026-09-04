@@ -11,13 +11,14 @@ namespace U3DViewer.Agent.IL2CPP;
 /// <summary>
 /// Runtime-only adapter for Sable's custom MiddenRenderPipelineInstance.
 ///
-/// Midden exposes an internal per-camera entry point:
+/// The game exposes both:
+///     Render(ScriptableRenderContext, Camera[])
 ///     Render(ref ScriptableRenderContext, Camera)
 ///
-/// We patch that entry point after the real source Camera is rendered and invoke it once more
-/// for the disabled U3DViewer Camera with the exact same ScriptableRenderContext. This keeps the
-/// free Camera out of the game's normal Camera list (avoiding the observed flicker) while still
-/// rendering it through the game's own custom pipeline.
+/// The top-level Camera[] override is the engine-facing custom-SRP entry point, so we patch
+/// that reliable boundary. After the game's normal cameras finish, we reuse the same context
+/// to invoke Midden's internal single-camera renderer for the disabled U3DViewer Camera.
+/// This keeps the free Camera outside Camera.allCameras while still using the game's pipeline.
 /// </summary>
 internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
 {
@@ -68,10 +69,13 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
 
     private static ManualLogSource? _log;
     private static Harmony? _harmony;
+    private static MethodInfo? _topLevelRender;
     private static MethodInfo? _singleCameraRender;
     private static bool _renderingFreeCamera;
+    private static bool _firstTopLevelHitLogged;
     private static bool _firstRenderLogged;
     private static bool _installFailureLogged;
+    private static long _topLevelHits;
 
     private float _nextResolveAt;
 
@@ -79,7 +83,8 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
     {
     }
 
-    internal static bool IsInstalled => _harmony is not null && _singleCameraRender is not null;
+    internal static bool IsInstalled =>
+        _harmony is not null && _topLevelRender is not null && _singleCameraRender is not null;
 
     public void Start()
     {
@@ -100,7 +105,6 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             return;
         }
         _nextResolveAt = now + ResolveIntervalSeconds;
-
         TryInstall();
     }
 
@@ -138,36 +142,38 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
                 return;
             }
 
+            var topLevelRender = ResolveTopLevelRender(managedType);
             var singleRender = ResolveSingleCameraRender(managedType);
-            if (singleRender is null)
+            if (topLevelRender is null || singleRender is null)
             {
                 LogInstallFailureOnce(
-                    $"Resolved {managedType.FullName}, but Render(ref ScriptableRenderContext, Camera) was not found on its managed interop wrapper.");
+                    $"Resolved {managedType.FullName}, but required Midden Render overloads were not both found on its managed interop wrapper.");
                 return;
             }
 
             var postfixMethod = typeof(MiddenRenderPipelineAdapter).GetMethod(
-                nameof(AfterMiddenCameraRender),
+                nameof(AfterMiddenFrameRender),
                 BindingFlags.Static | BindingFlags.NonPublic);
             if (postfixMethod is null)
             {
-                LogInstallFailureOnce("Midden adapter postfix method could not be resolved.");
+                LogInstallFailureOnce("Midden adapter frame postfix method could not be resolved.");
                 return;
             }
 
-            var harmony = new Harmony("dev.u3dviewer.agent.il2cpp.midden-single-camera");
-            harmony.Patch(singleRender, postfix: new HarmonyMethod(postfixMethod));
+            var harmony = new Harmony("dev.u3dviewer.agent.il2cpp.midden-frame-render");
+            harmony.Patch(topLevelRender, postfix: new HarmonyMethod(postfixMethod));
 
+            _topLevelRender = topLevelRender;
             _singleCameraRender = singleRender;
             _harmony = harmony;
             _installFailureLogged = false;
             _log?.LogInfo(
-                $"[MiddenAdapter] Installed isolated free-Camera render hook on {managedType.FullName}.{singleRender.Name}. " +
-                "The U3DViewer Camera remains disabled and will be rendered immediately after the selected source Camera using the same ScriptableRenderContext.");
+                $"[MiddenAdapter] Installed engine-facing render hook on {managedType.FullName}.{topLevelRender}. " +
+                $"Isolated free Camera will use {singleRender} after the game's normal camera pass.");
         }
         catch (Exception ex)
         {
-            LogInstallFailureOnce($"Could not install Midden single-Camera render adapter: {ex}");
+            LogInstallFailureOnce($"Could not install Midden top-level render adapter: {ex}");
         }
     }
 
@@ -209,17 +215,43 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         return FindLoaded();
     }
 
+    private static MethodInfo? ResolveTopLevelRender(Type pipelineType)
+    {
+        foreach (var method in pipelineType.GetMethods(
+                     BindingFlags.Instance |
+                     BindingFlags.Public |
+                     BindingFlags.NonPublic |
+                     BindingFlags.DeclaredOnly))
+        {
+            if (!string.Equals(method.Name, "Render", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var parameters = method.GetParameters();
+            if (parameters.Length != 2 || parameters[0].ParameterType != typeof(ScriptableRenderContext))
+            {
+                continue;
+            }
+
+            var second = parameters[1].ParameterType;
+            if (second.IsArray || second.Name.Contains("Array", StringComparison.OrdinalIgnoreCase))
+            {
+                return method;
+            }
+        }
+
+        return null;
+    }
+
     private static MethodInfo? ResolveSingleCameraRender(Type pipelineType)
     {
-        var methods = pipelineType.GetMethods(
-            BindingFlags.Instance |
-            BindingFlags.Public |
-            BindingFlags.NonPublic |
-            BindingFlags.DeclaredOnly);
-
-        for (var index = 0; index < methods.Length; index++)
+        foreach (var method in pipelineType.GetMethods(
+                     BindingFlags.Instance |
+                     BindingFlags.Public |
+                     BindingFlags.NonPublic |
+                     BindingFlags.DeclaredOnly))
         {
-            var method = methods[index];
             if (!string.Equals(method.Name, "Render", StringComparison.Ordinal))
             {
                 continue;
@@ -237,25 +269,32 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
                 continue;
             }
 
-            if (!typeof(Camera).IsAssignableFrom(parameters[1].ParameterType))
+            if (typeof(Camera).IsAssignableFrom(parameters[1].ParameterType))
             {
-                continue;
+                return method;
             }
-
-            return method;
         }
 
         return null;
     }
 
-    // This exact signature matches MiddenRenderPipelineInstance.Render(ref ScriptableRenderContext, Camera).
-    // The recursion guard is necessary because the adapter invokes the same method for the free Camera.
-    private static void AfterMiddenCameraRender(
+    // The second argument deliberately uses object: generated IL2CPP wrappers may expose the
+    // Camera[] parameter as an Il2CppReferenceArray<Camera> rather than a CLR Camera[]. We do
+    // not need to mutate it; the context is the only input required for isolated rendering.
+    private static void AfterMiddenFrameRender(
         object __instance,
-        ref ScriptableRenderContext __0,
-        Camera __1)
+        ScriptableRenderContext __0,
+        object __1)
     {
-        if (_renderingFreeCamera || __1 is null)
+        _topLevelHits++;
+        if (!_firstTopLevelHitLogged)
+        {
+            _firstTopLevelHitLogged = true;
+            _log?.LogInfo(
+                $"[MiddenAdapter] Engine-facing Midden Render hook is active. First hit #{_topLevelHits}; camera-array managed type={__1?.GetType().FullName ?? "<null>"}.");
+        }
+
+        if (_renderingFreeCamera)
         {
             return;
         }
@@ -275,7 +314,7 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         var sourceCameraId = FreeEffectiveSourceCameraIdField?.GetValue(controller) is int sourceId
             ? sourceId
             : 0;
-        if (sourceCameraId == 0 || __1.GetInstanceID() != sourceCameraId)
+        if (sourceCameraId == 0)
         {
             return;
         }
@@ -328,7 +367,6 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         {
             ApplyFollowTransformMethod?.Invoke(controller, new object[] { false });
 
-            // Keep the free Camera permanently outside Camera.allCameras / the game's normal list.
             freeCamera.enabled = false;
             freeCamera.targetTexture = renderTexture;
 
@@ -340,7 +378,9 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
                 __0 = updatedContext;
             }
 
-            // Publish exactly the texture NativeBridge owns. This mirrors the proven direct-capture path.
+            // Midden's per-camera renderer records SRP commands into the supplied context.
+            // Submit before the transport blit so NativeBridge never copies the previous frame.
+            __0.Submit();
             Graphics.Blit(renderTexture, transportTexture);
             GL.IssuePluginEvent(renderEvent, copyEventId);
 
@@ -350,26 +390,26 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             FreeRecordRenderFrameMethod?.Invoke(controller, new object[] { now });
             FreeRenderStatusField?.SetValue(
                 controller,
-                "Midden custom SRP free Scene Camera rendered through Render(ref ScriptableRenderContext, Camera) and published to NativeBridge.");
+                "Midden custom SRP free Scene Camera rendered after the engine-facing camera pass and published to NativeBridge.");
 
             if (!_firstRenderLogged)
             {
                 _firstRenderLogged = true;
                 _log?.LogInfo(
-                    $"[MiddenAdapter] First isolated free Scene Camera frame rendered after source Camera {sourceCameraId}; " +
-                    $"free={freeCamera.GetInstanceID()} target={renderTexture.width}x{renderTexture.height}.");
+                    $"[MiddenAdapter] First isolated free Scene Camera frame rendered from top-level hook; " +
+                    $"source={sourceCameraId}, free={freeCamera.GetInstanceID()}, target={renderTexture.width}x{renderTexture.height}.");
             }
         }
         catch (TargetInvocationException ex)
         {
             var inner = ex.InnerException ?? ex;
-            FreeRenderStatusField?.SetValue(controller, $"Midden single-Camera render failed: {inner.Message}");
-            _log?.LogWarning($"[MiddenAdapter] Single-Camera render failed: {inner}");
+            FreeRenderStatusField?.SetValue(controller, $"Midden isolated render failed: {inner.Message}");
+            _log?.LogWarning($"[MiddenAdapter] Isolated render failed: {inner}");
         }
         catch (Exception ex)
         {
-            FreeRenderStatusField?.SetValue(controller, $"Midden single-Camera render failed: {ex.Message}");
-            _log?.LogWarning($"[MiddenAdapter] Single-Camera render failed: {ex}");
+            FreeRenderStatusField?.SetValue(controller, $"Midden isolated render failed: {ex.Message}");
+            _log?.LogWarning($"[MiddenAdapter] Isolated render failed: {ex}");
         }
         finally
         {
@@ -392,10 +432,13 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
     {
         var harmony = _harmony;
         _harmony = null;
+        _topLevelRender = null;
         _singleCameraRender = null;
         _renderingFreeCamera = false;
+        _firstTopLevelHitLogged = false;
         _firstRenderLogged = false;
         _installFailureLogged = false;
+        _topLevelHits = 0;
 
         if (harmony is not null)
         {
