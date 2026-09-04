@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using BepInEx.Logging;
 using HarmonyLib;
+using Il2CppInterop.Runtime.InteropTypes;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -26,8 +27,6 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         typeof(SceneCameraController).GetField("_camera", InstancePrivate);
     private static readonly FieldInfo? FreeViewerVisibleField =
         typeof(SceneCameraController).GetField("_viewerVisible", InstancePrivate);
-    private static readonly FieldInfo? FreeSelectedSourceIdField =
-        typeof(SceneCameraController).GetField("_selectedSourceCameraInstanceId", InstancePrivate);
     private static readonly FieldInfo? FreeEffectiveSourceIdField =
         typeof(SceneCameraController).GetField("_effectiveSourceCameraInstanceId", InstancePrivate);
     private static readonly FieldInfo? FreeRenderStatusField =
@@ -60,7 +59,8 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         {
             _guardHarmony = new Harmony("dev.u3dviewer.agent.il2cpp.custom-srp-camera-guard");
             _guardHarmony.CreateClassProcessor(typeof(CustomSrpCameraGuardPatch)).Patch();
-            _sharedLog.LogInfo("[SceneDiag] Custom-SRP camera guard installed. It only suppresses the free Camera from the game camera list when no isolated URP RenderSingleCamera path exists.");
+            _sharedLog.LogInfo(
+                "[SceneDiag] Custom-SRP camera guard installed. Free Camera is kept out of the game camera list when no isolated URP RenderSingleCamera path exists.");
         }
         catch (Exception ex)
         {
@@ -144,44 +144,15 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
 
     private void LogPipeline(bool force)
     {
-        string pipeline;
-        try
-        {
-            var current = RenderPipelineManager.currentPipeline;
-            pipeline = current is null
-                ? "<Built-in/null>"
-                : $"{current.GetType().FullName ?? current.GetType().Name} [asm={current.GetType().Assembly.GetName().Name}]";
-        }
-        catch (Exception ex)
-        {
-            pipeline = $"<error:{ex.GetType().Name}:{ex.Message}>";
-        }
+        var current = RenderPipelineManager.currentPipeline;
+        var managedType = current is null
+            ? "<Built-in/null>"
+            : $"{current.GetType().FullName ?? current.GetType().Name} [asm={current.GetType().Assembly.GetName().Name}]";
+        var il2cppType = current is null ? "<none>" : DescribeIl2CppType(current);
+        var state =
+            $"managed={managedType}; il2cpp={il2cppType}; isolatedURP={HasIsolatedUrpPath()}; " +
+            $"managedRenderAssemblies={DescribeManagedRenderAssemblies()}";
 
-        var assemblies = new StringBuilder();
-        try
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                var name = assembly.GetName().Name ?? string.Empty;
-                if (name.IndexOf("RenderPipeline", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    name.IndexOf("Universal", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    name.IndexOf("HighDefinition", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    continue;
-                }
-
-                if (assemblies.Length > 0)
-                {
-                    assemblies.Append(',');
-                }
-                assemblies.Append(name);
-            }
-        }
-        catch
-        {
-        }
-
-        var state = $"pipeline={pipeline}; isolatedURP={HasIsolatedUrpPath()}; renderAssemblies={assemblies}";
         if (!force && string.Equals(state, _lastPipeline, StringComparison.Ordinal))
         {
             return;
@@ -228,6 +199,7 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
             {
                 builder.Append(" | ");
             }
+
             builder.Append(DescribeCamera(cameras[index]));
         }
         return builder.ToString();
@@ -242,10 +214,11 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
 
         try
         {
+            var position = camera.transform.position;
             return
                 $"{camera.name}#{camera.GetInstanceID()} enabled={camera.enabled} depth={camera.depth:0.###} " +
                 $"target={(camera.targetTexture is null ? "screen" : camera.targetTexture.name)} " +
-                $"pos=({camera.transform.position.x:0.##},{camera.transform.position.y:0.##},{camera.transform.position.z:0.##}) " +
+                $"pos=({position.x:0.##},{position.y:0.##},{position.z:0.##}) " +
                 $"components=[{DescribeComponents(camera.gameObject)}]";
         }
         catch (Exception ex)
@@ -273,12 +246,7 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
                     builder.Append(',');
                 }
 
-                var type = component.GetType();
-                builder.Append(type.FullName ?? type.Name);
-                if (component is Behaviour behaviour)
-                {
-                    builder.Append("(enabled=").Append(behaviour.enabled).Append(')');
-                }
+                builder.Append(DescribeIl2CppType(component));
             }
             return builder.ToString();
         }
@@ -288,29 +256,103 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         }
     }
 
+    private static string DescribeIl2CppType(Il2CppSystem.Object value)
+    {
+        try
+        {
+            var type = value.GetIl2CppType();
+            if (type is null)
+            {
+                return "<il2cpp-type:null>";
+            }
+
+            var fullName = type.FullName ?? type.Name ?? "<unnamed>";
+            var assembly = type.Assembly?.FullName ?? "<assembly?>";
+            return $"{fullName} [asm={assembly}]";
+        }
+        catch (Exception ex)
+        {
+            return $"<il2cpp-type error:{ex.GetType().Name}:{ex.Message}>";
+        }
+    }
+
+    private static string DescribeManagedRenderAssemblies()
+    {
+        var builder = new StringBuilder();
+        try
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var name = assembly.GetName().Name ?? string.Empty;
+                if (name.IndexOf("RenderPipeline", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf("Universal", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    name.IndexOf("HighDefinition", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                if (builder.Length > 0)
+                {
+                    builder.Append(',');
+                }
+                builder.Append(name);
+            }
+        }
+        catch
+        {
+        }
+        return builder.ToString();
+    }
+
     private void LogSummary()
     {
         var controller = SceneCameraField?.GetValue(null) as SceneCameraController;
         var direct = SourceCaptureField?.GetValue(null) as SourceCameraCaptureController;
         var camera = controller is null ? null : FreeCameraField?.GetValue(controller) as Camera;
-        var selected = controller is null ? 0 : ReadInt(FreeSelectedSourceIdField, controller);
         var effective = controller is null ? 0 : ReadInt(FreeEffectiveSourceIdField, controller);
         var visible = controller is not null && ReadBool(FreeViewerVisibleField, controller);
         var status = controller is null ? string.Empty : ReadString(FreeRenderStatusField, controller);
-        var position = camera is null
-            ? "<null>"
-            : $"({camera.transform.position.x:0.##},{camera.transform.position.y:0.##},{camera.transform.position.z:0.##})";
+        var freePosition = camera is null ? "<null>" : DescribePosition(camera.transform.position);
+        var sourcePosition = DescribeSourcePosition(effective);
 
         _sharedLog?.LogInfo(
             $"[SceneDiag] Summary: customSRPGuard={IsCustomSrpWithoutIsolatedCameraPath()}; " +
-            $"viewerVisible={visible}; freeCameraEnabled={camera?.enabled}; freePos={position}; " +
-            $"selectedSource={selected}; effectiveSource={effective}; directCapture={direct?.Enabled}; " +
+            $"viewerVisible={visible}; freeCameraEnabled={camera?.enabled}; freePos={freePosition}; " +
+            $"effectiveSource={effective}; sourcePos={sourcePosition}; directCapture={direct?.Enabled}; " +
             $"endCameraRendering/{SummaryIntervalSeconds:0.0}s={_endCameraCallbacks}; selectedMatches={_selectedSourceCallbacks}; " +
             $"owner={SceneTransportCoordinator.Owner}; epoch={SceneTransportCoordinator.Epoch}; status={status}");
 
         _endCameraCallbacks = 0;
         _selectedSourceCallbacks = 0;
     }
+
+    private static string DescribeSourcePosition(int instanceId)
+    {
+        if (instanceId == 0)
+        {
+            return "<none>";
+        }
+
+        try
+        {
+            var cameras = Camera.allCameras ?? Array.Empty<Camera>();
+            for (var index = 0; index < cameras.Length; index++)
+            {
+                var camera = cameras[index];
+                if (camera is not null && camera.GetInstanceID() == instanceId)
+                {
+                    return DescribePosition(camera.transform.position);
+                }
+            }
+        }
+        catch
+        {
+        }
+        return "<unavailable>";
+    }
+
+    private static string DescribePosition(Vector3 position) =>
+        $"({position.x:0.##},{position.y:0.##},{position.z:0.##})";
 
     private static bool ReadBool(FieldInfo? field, object instance)
     {
