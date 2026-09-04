@@ -9,9 +9,10 @@ using UnityEngine.Rendering;
 namespace U3DViewer.Agent.IL2CPP;
 
 /// <summary>
-/// End-of-frame transport support for SRP games. Direct-source mode falls back to the
-/// completed Game View when camera callbacks are unavailable; free-camera mode publishes
-/// the RenderTexture that the active RenderPipeline rendered for the U3DViewer Camera.
+/// SRP transport support. Direct-source mode falls back to the completed Game View when
+/// camera callbacks are unavailable. For URP, the free Scene Camera is rendered explicitly
+/// through UniversalRenderPipeline.RenderSingleCamera instead of being inserted into the
+/// game's normal Camera list.
 /// </summary>
 internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 {
@@ -42,6 +43,8 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 
     private static readonly FieldInfo? FreeCameraField =
         typeof(SceneCameraController).GetField("_camera", InstancePrivate);
+    private static readonly FieldInfo? FreeRenderTextureField =
+        typeof(SceneCameraController).GetField("_renderTexture", InstancePrivate);
     private static readonly FieldInfo? FreeTransportTextureField =
         typeof(SceneCameraController).GetField("_transportTexture", InstancePrivate);
     private static readonly FieldInfo? FreeViewerVisibleField =
@@ -52,6 +55,8 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         typeof(SceneCameraController).GetField("_renderEvent", InstancePrivate);
     private static readonly FieldInfo? FreeCopyEventIdField =
         typeof(SceneCameraController).GetField("_copyEventId", InstancePrivate);
+    private static readonly FieldInfo? FreeEffectiveSourceCameraIdField =
+        typeof(SceneCameraController).GetField("_effectiveSourceCameraInstanceId", InstancePrivate);
     private static readonly FieldInfo? FreeNextRenderAtField =
         typeof(SceneCameraController).GetField("_nextRenderAt", InstancePrivate);
     private static readonly FieldInfo? FreeInteractiveUntilField =
@@ -69,16 +74,47 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 
     private static MethodInfo? _screenCaptureMethod;
     private static bool _screenCaptureResolved;
+    private static MethodInfo? _urpRenderSingleCameraMethod;
+    private static bool _urpRenderSingleCameraResolved;
 
+    private readonly System.Action<ScriptableRenderContext, Camera> _managedEndCameraRenderingHandler;
+    private readonly Il2CppSystem.Action<ScriptableRenderContext, Camera> _endCameraRenderingHandler;
     private RenderTexture? _screenCaptureStaging;
 
     public SourceCaptureEndOfFrameFallback(IntPtr pointer) : base(pointer)
     {
+        _managedEndCameraRenderingHandler = OnEndCameraRendering;
+        _endCameraRenderingHandler =
+            (Il2CppSystem.Action<ScriptableRenderContext, Camera>)_managedEndCameraRenderingHandler;
+        RenderPipelineManager.endCameraRendering += _endCameraRenderingHandler;
     }
 
     public void Start()
     {
         this.StartCoroutine(CaptureLoop());
+    }
+
+    public void LateUpdate()
+    {
+        if (RenderPipelineManager.currentPipeline is null)
+        {
+            return;
+        }
+
+        var directController = SourceCaptureField?.GetValue(null) as SourceCameraCaptureController;
+        if (directController?.Enabled == true)
+        {
+            SetFreeCameraEnabled(false);
+            return;
+        }
+
+        // When URP exposes its supported standalone camera path, never insert the U3DViewer
+        // Camera into the game's normal Camera list. This avoids perturbing the game's own
+        // camera ordering/global render state (observed as main-window flicker in Sable).
+        if (ResolveUrpRenderSingleCameraMethod() is not null)
+        {
+            SetFreeCameraEnabled(false);
+        }
     }
 
     private IEnumerator CaptureLoop()
@@ -99,10 +135,119 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
                 SetFreeCameraEnabled(false);
                 TryCaptureDirectFallbackFrame(directController);
             }
-            else
+            else if (ResolveUrpRenderSingleCameraMethod() is null)
             {
-                TryPublishFreeSceneCameraFrame();
+                // Non-URP/custom SRP fallback: preserve the previous behaviour. Standard URP
+                // is handled in OnEndCameraRendering through RenderSingleCamera instead.
+                TryPublishFreeSceneCameraFrameLegacy();
             }
+        }
+    }
+
+    private void OnEndCameraRendering(ScriptableRenderContext context, Camera completedCamera)
+    {
+        if (completedCamera is null || RenderPipelineManager.currentPipeline is null)
+        {
+            return;
+        }
+
+        var directController = SourceCaptureField?.GetValue(null) as SourceCameraCaptureController;
+        if (directController?.Enabled == true)
+        {
+            return;
+        }
+
+        var renderSingleCamera = ResolveUrpRenderSingleCameraMethod();
+        if (renderSingleCamera is null)
+        {
+            return;
+        }
+
+        var controller = SceneCameraField?.GetValue(null) as SceneCameraController;
+        if (controller is null || !SceneTransportCoordinator.IsOwner(SceneTransportOwner.FreeCamera))
+        {
+            return;
+        }
+
+        var freeCamera = FreeCameraField?.GetValue(controller) as Camera;
+        var renderTexture = FreeRenderTextureField?.GetValue(controller) as RenderTexture;
+        var transportTexture = FreeTransportTextureField?.GetValue(controller) as RenderTexture;
+        var viewerVisible = FreeViewerVisibleField?.GetValue(controller) is bool visible && visible;
+        var bridgeReady = FreeBridgeReadyField?.GetValue(controller) is bool ready && ready;
+        var sourceCameraId = FreeEffectiveSourceCameraIdField?.GetValue(controller) is int sourceId
+            ? sourceId
+            : 0;
+
+        if (freeCamera is null || renderTexture is null || transportTexture is null ||
+            !viewerVisible || !bridgeReady || sourceCameraId == 0 ||
+            completedCamera.GetInstanceID() != sourceCameraId)
+        {
+            return;
+        }
+
+        var renderEvent = FreeRenderEventField?.GetValue(controller) is IntPtr eventPtr
+            ? eventPtr
+            : IntPtr.Zero;
+        var copyEventId = FreeCopyEventIdField?.GetValue(controller) is int eventId
+            ? eventId
+            : 0;
+        if (renderEvent == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var now = Time.unscaledTime;
+        var nextRenderAt = FreeNextRenderAtField?.GetValue(controller) is float next
+            ? next
+            : 0f;
+        if (now < nextRenderAt)
+        {
+            return;
+        }
+
+        var interactiveUntil = FreeInteractiveUntilField?.GetValue(controller) is float interactive
+            ? interactive
+            : 0f;
+        var idleFps = FreeIdleFpsField?.GetValue(controller) is float idle
+            ? idle
+            : 15f;
+        var interactiveFps = FreeInteractiveFpsField?.GetValue(controller) is float active
+            ? active
+            : 30f;
+        var fps = now < interactiveUntil ? interactiveFps : idleFps;
+        FreeNextRenderAtField?.SetValue(controller, now + 1f / Mathf.Max(MinCaptureFps, fps));
+
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            // RenderSingleCamera is URP's supported procedural-camera entry point. Keep this
+            // camera disabled so it never participates in the game's normal camera ordering.
+            freeCamera.enabled = false;
+            freeCamera.targetTexture = renderTexture;
+            renderSingleCamera.Invoke(null, new object[] { context, freeCamera });
+
+            // Write the exact NativeBridge source texture immediately before the plugin event,
+            // mirroring the direct-capture path that is already known to work in this game.
+            Graphics.Blit(renderTexture, transportTexture);
+            GL.IssuePluginEvent(renderEvent, copyEventId);
+
+            var elapsedMs =
+                (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
+            FreeRecordRenderTimingMethod?.Invoke(controller, new object[] { elapsedMs });
+            FreeRecordRenderFrameMethod?.Invoke(controller, new object[] { now });
+            FreeRenderStatusField?.SetValue(
+                controller,
+                "URP free Scene Camera rendered through UniversalRenderPipeline.RenderSingleCamera; isolated from the game Camera list.");
+        }
+        catch (TargetInvocationException ex)
+        {
+            FreeRenderStatusField?.SetValue(
+                controller,
+                $"URP RenderSingleCamera failed: {ex.InnerException?.Message ?? ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            FreeRenderStatusField?.SetValue(controller, $"URP RenderSingleCamera failed: {ex.Message}");
         }
     }
 
@@ -180,8 +325,6 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
                 captureMode = "final Game View, vertically corrected";
             }
 
-            // Screen capture / Blit enqueue their GPU work first; enqueue the NativeBridge
-            // copy immediately afterwards to preserve render-thread order.
             GL.IssuePluginEvent(renderEvent, copyEventId);
 
             var elapsedMs =
@@ -209,7 +352,7 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         }
     }
 
-    private static void TryPublishFreeSceneCameraFrame()
+    private static void TryPublishFreeSceneCameraFrameLegacy()
     {
         var controller = SceneCameraField?.GetValue(null) as SceneCameraController;
         if (controller is null)
@@ -261,9 +404,6 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         var started = Stopwatch.GetTimestamp();
         try
         {
-            // Mirror the proven direct-capture submission model: write the completed free
-            // Camera image into the exact RenderTexture owned by NativeBridge, then enqueue
-            // the plugin event immediately behind that GPU write.
             Graphics.Blit(camera.targetTexture, transportTexture);
             GL.IssuePluginEvent(renderEvent, copyEventId);
 
@@ -276,13 +416,13 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
             var pipelineName = pipeline?.GetType().FullName ?? pipeline?.GetType().Name ?? "unknown SRP";
             FreeRenderStatusField?.SetValue(
                 controller,
-                $"SRP free Scene Camera is rendered by {pipelineName}; frame copied into the dedicated NativeBridge transport target at end-of-frame.");
+                $"Custom SRP free Scene Camera frame copied into the NativeBridge transport target; pipeline {pipelineName}.");
         }
         catch (Exception ex)
         {
             FreeRenderStatusField?.SetValue(
                 controller,
-                $"SRP free Scene Camera publication failed: {ex.Message}");
+                $"Custom SRP free Scene Camera publication failed: {ex.Message}");
         }
     }
 
@@ -333,7 +473,16 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
             return null;
         }
 
-        var cameras = Camera.allCameras;
+        Camera[] cameras;
+        try
+        {
+            cameras = Camera.allCameras ?? Array.Empty<Camera>();
+        }
+        catch
+        {
+            return null;
+        }
+
         for (var index = 0; index < cameras.Length; index++)
         {
             var camera = cameras[index];
@@ -344,6 +493,49 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
         }
 
         return null;
+    }
+
+    private static MethodInfo? ResolveUrpRenderSingleCameraMethod()
+    {
+        if (_urpRenderSingleCameraResolved)
+        {
+            return _urpRenderSingleCameraMethod;
+        }
+
+        _urpRenderSingleCameraResolved = true;
+        Type? urpType = null;
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            urpType = assembly.GetType(
+                "UnityEngine.Rendering.Universal.UniversalRenderPipeline",
+                throwOnError: false);
+            if (urpType is not null)
+            {
+                break;
+            }
+        }
+
+        if (urpType is null)
+        {
+            try
+            {
+                var assembly = Assembly.Load("Unity.RenderPipelines.Universal.Runtime");
+                urpType = assembly.GetType(
+                    "UnityEngine.Rendering.Universal.UniversalRenderPipeline",
+                    throwOnError: false);
+            }
+            catch
+            {
+            }
+        }
+
+        _urpRenderSingleCameraMethod = urpType?.GetMethod(
+            "RenderSingleCamera",
+            BindingFlags.Public | BindingFlags.Static,
+            binder: null,
+            types: new[] { typeof(ScriptableRenderContext), typeof(Camera) },
+            modifiers: null);
+        return _urpRenderSingleCameraMethod;
     }
 
     private static MethodInfo? ResolveScreenCaptureMethod()
@@ -396,6 +588,14 @@ internal sealed class SourceCaptureEndOfFrameFallback : MonoBehaviour
 
     public void OnDestroy()
     {
+        try
+        {
+            RenderPipelineManager.endCameraRendering -= _endCameraRenderingHandler;
+        }
+        catch
+        {
+        }
+
         ReleaseScreenCaptureStaging();
     }
 }
