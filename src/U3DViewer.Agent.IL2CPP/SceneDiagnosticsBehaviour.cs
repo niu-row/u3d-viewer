@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using BepInEx.Logging;
@@ -548,10 +550,6 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
         {
         }
 
-        if (_log is not null)
-        {
-            Logger.Sources.Remove(_log);
-            _log = null;
-        }
+        _log = null;
     }
 }
