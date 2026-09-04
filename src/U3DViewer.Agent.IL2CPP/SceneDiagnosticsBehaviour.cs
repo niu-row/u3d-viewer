@@ -86,7 +86,7 @@ internal sealed class SceneDiagnosticsBehaviour : MonoBehaviour
 
     public void Start()
     {
-        _log = Logger.CreateLogSource("U3DViewer SceneDiag");
+        _log = BepInEx.Logging.Logger.CreateLogSource("U3DViewer SceneDiag");
         _nextSummaryAt = 0f;
         _log.LogInfo("[SceneDiag] Diagnostics enabled. Logging is observational only; no Scene render/transport state is modified.");
         LogUrpResolution(force: true);
