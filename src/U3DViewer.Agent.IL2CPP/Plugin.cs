@@ -21,6 +21,7 @@ public sealed class Plugin : BasePlugin
     private static bool _bootstrapResizeNoticeLogged;
     private static bool _bootstrapRecoverNoticeLogged;
     private static bool _srpSceneNoticeLogged;
+    private static bool _srpEnableConflictLogged;
 
     private PipeServer? _pipeServer;
     private Harmony? _sceneTransportHarmony;
@@ -31,6 +32,7 @@ public sealed class Plugin : BasePlugin
         _bootstrapResizeNoticeLogged = false;
         _bootstrapRecoverNoticeLogged = false;
         _srpSceneNoticeLogged = false;
+        _srpEnableConflictLogged = false;
         InstallSceneTransportCompatibility();
 
         var pipeName = $"u3d-viewer-{Process.GetCurrentProcess().Id}";
@@ -40,6 +42,7 @@ public sealed class Plugin : BasePlugin
         RuntimeBehaviour.Initialize(_pipeServer, Log);
         AddComponent<RuntimeBehaviour>();
         AddComponent<SourceCaptureEndOfFrameFallback>();
+        AddComponent<SceneDiagnosticsBehaviour>();
 
         Log.LogInfo($"U3D Viewer IL2CPP agent loaded. Pipe: {pipeName}");
     }
@@ -227,6 +230,11 @@ public sealed class Plugin : BasePlugin
                     return;
                 }
 
+                var beforeGeneration = RenderGenerationField.GetValue(instance) is int beforeValue ? beforeValue : 0;
+                var beforeShared = SharedNameField?.GetValue(instance) as string ?? string.Empty;
+                _sharedLog?.LogInfo(
+                    $"[SceneDiag] Free transport rebind begin: owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, generation={beforeGeneration}, shared={beforeShared}.");
+
                 EnsureCameraMethod.Invoke(instance, null);
                 if (TransportTextureField.GetValue(instance) is not RenderTexture transportTexture)
                 {
@@ -240,6 +248,9 @@ public sealed class Plugin : BasePlugin
                     _sharedLog?.LogWarning("Could not rebind free Scene transport: transport RenderTexture has no native D3D11 texture.");
                     return;
                 }
+
+                _sharedLog?.LogInfo(
+                    $"[SceneDiag] Free transport before reset: rt={transportTexture.name} {transportTexture.width}x{transportTexture.height}, created={transportTexture.IsCreated()}, nativePtr=0x{nativeTexture.ToInt64():X}.");
 
                 // Reset the one process-global writer, then make the still-live free transport
                 // texture a fresh generation. TryInitializeBridge will call SetSourceTexture,
@@ -256,19 +267,32 @@ public sealed class Plugin : BasePlugin
 
                 var bridgeReady = BridgeReadyField.GetValue(instance) is bool ready && ready;
                 var sharedName = SharedNameField?.GetValue(instance) as string ?? string.Empty;
+                var writerReady = 0;
+                var hresult = 0;
+                try
+                {
+                    writerReady = string.IsNullOrWhiteSpace(sharedName)
+                        ? 0
+                        : NativeBridge.U3DViewer_IsSceneWriterReady(sharedName);
+                    hresult = NativeBridge.U3DViewer_GetLastError();
+                }
+                catch
+                {
+                }
+
                 _sharedLog?.LogInfo(
                     bridgeReady
-                        ? $"Rebound existing free Scene transport without recreating RenderTextures. Shared target: {sharedName}."
-                        : "Rebound existing free Scene transport, but NativeBridge did not become ready.");
+                        ? $"Rebound existing free Scene transport without recreating RenderTextures. Shared target: {sharedName}. owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, writerReady={writerReady}, HRESULT=0x{hresult:X8}."
+                        : $"Rebound existing free Scene transport, but NativeBridge did not become ready. owner={SceneTransportCoordinator.Owner}, epoch={SceneTransportCoordinator.Epoch}, HRESULT=0x{hresult:X8}.");
             }
             catch (TargetInvocationException ex)
             {
                 _sharedLog?.LogWarning(
-                    $"Could not rebind existing free Scene transport: {ex.InnerException?.Message ?? ex.Message}");
+                    $"Could not rebind existing free Scene transport: {ex.InnerException ?? ex}");
             }
             catch (Exception ex)
             {
-                _sharedLog?.LogWarning($"Could not rebind existing free Scene transport: {ex.Message}");
+                _sharedLog?.LogWarning($"Could not rebind existing free Scene transport: {ex}");
             }
         }
     }
@@ -337,6 +361,12 @@ public sealed class Plugin : BasePlugin
                 var viewerVisible = ViewerVisibleField?.GetValue(__instance) is bool visible && visible;
                 if (camera is not null)
                 {
+                    if (viewerVisible && !camera.enabled && !_srpEnableConflictLogged)
+                    {
+                        _srpEnableConflictLogged = true;
+                        _sharedLog?.LogWarning(
+                            "[SceneDiag] SRP TickRender is re-enabling __U3DViewerCamera after it was disabled. If the isolated URP path disables it later in the frame, enabled state is oscillating and may explain game-window flicker.");
+                    }
                     camera.enabled = viewerVisible;
                 }
 
@@ -362,7 +392,7 @@ public sealed class Plugin : BasePlugin
             }
             catch (Exception ex)
             {
-                _sharedLog?.LogWarning($"Could not route free Scene Camera through SRP: {ex.Message}");
+                _sharedLog?.LogWarning($"Could not route free Scene Camera through SRP: {ex}");
                 return true;
             }
         }
