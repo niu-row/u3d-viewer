@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using BepInEx.Logging;
 using HarmonyLib;
-using Il2CppInterop.Runtime.InteropTypes;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using U3DViewer.Protocol;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -12,14 +12,11 @@ namespace U3DViewer.Agent.IL2CPP;
 /// <summary>
 /// Runtime-only adapter for Sable's custom MiddenRenderPipelineInstance.
 ///
-/// The game exposes both:
-///     Render(ScriptableRenderContext, Camera[])
-///     Render(ref ScriptableRenderContext, Camera)
-///
-/// The top-level Camera[] override is the engine-facing custom-SRP entry point, so we patch
-/// that reliable boundary. After the game's normal cameras finish, we reuse the same context
-/// to invoke Midden's internal single-camera renderer for the disabled U3DViewer Camera.
-/// This keeps the free Camera outside Camera.allCameras while still using the game's pipeline.
+/// Midden owns process-wide render state and internal target caches, so invoking its private
+/// single-camera Render overload a second time after the normal frame can disturb the game output.
+/// Instead, this adapter prepends the disabled U3DViewer Camera to the engine-provided camera list.
+/// Midden renders it inside the normal frame, then renders the game's cameras afterwards so the
+/// game window remains authoritative. The postfix only publishes the completed free-camera target.
 /// </summary>
 internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
 {
@@ -76,11 +73,10 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
     private static ManualLogSource? _log;
     private static Harmony? _harmony;
     private static MethodInfo? _topLevelRender;
-    private static MethodInfo? _singleCameraRender;
-    private static bool _renderingFreeCamera;
     private static bool _firstTopLevelHitLogged;
     private static bool _firstRenderLogged;
     private static bool _installFailureLogged;
+    private static bool _arrayInjectionFailureLogged;
     private static bool _streamResizePinnedLogged;
     private static int _poseSyncSourceCameraId;
     private static float _poseSyncUntil;
@@ -94,7 +90,7 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
     }
 
     internal static bool IsInstalled =>
-        _harmony is not null && _topLevelRender is not null && _singleCameraRender is not null;
+        _harmony is not null && _topLevelRender is not null;
 
     public void Start()
     {
@@ -114,6 +110,7 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         {
             return;
         }
+
         _nextResolveAt = now + ResolveIntervalSeconds;
         TryInstall();
     }
@@ -154,19 +151,21 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             }
 
             var topLevelRender = ResolveTopLevelRender(managedType);
-            var singleRender = ResolveSingleCameraRender(managedType);
             var sceneApply = typeof(SceneCameraController).GetMethod(
                 nameof(SceneCameraController.Apply),
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var postfixMethod = typeof(MiddenRenderPipelineAdapter).GetMethod(
+            var framePrefixMethod = typeof(MiddenRenderPipelineAdapter).GetMethod(
+                nameof(BeforeMiddenFrameRender),
+                BindingFlags.Static | BindingFlags.NonPublic);
+            var framePostfixMethod = typeof(MiddenRenderPipelineAdapter).GetMethod(
                 nameof(AfterMiddenFrameRender),
                 BindingFlags.Static | BindingFlags.NonPublic);
             var streamPrefixMethod = typeof(MiddenRenderPipelineAdapter).GetMethod(
                 nameof(StabilizeMiddenStreamSettings),
                 BindingFlags.Static | BindingFlags.NonPublic);
 
-            if (topLevelRender is null || singleRender is null || sceneApply is null ||
-                postfixMethod is null || streamPrefixMethod is null)
+            if (topLevelRender is null || sceneApply is null || framePrefixMethod is null ||
+                framePostfixMethod is null || streamPrefixMethod is null)
             {
                 LogInstallFailureOnce(
                     $"Resolved {managedType.FullName}, but one or more required Midden render/Scene command members were unavailable.");
@@ -174,16 +173,19 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             }
 
             harmony = new Harmony("dev.u3dviewer.agent.il2cpp.midden-frame-render");
-            harmony.Patch(topLevelRender, postfix: new HarmonyMethod(postfixMethod));
+            harmony.Patch(
+                topLevelRender,
+                prefix: new HarmonyMethod(framePrefixMethod),
+                postfix: new HarmonyMethod(framePostfixMethod));
             harmony.Patch(sceneApply, prefix: new HarmonyMethod(streamPrefixMethod));
 
             _topLevelRender = topLevelRender;
-            _singleCameraRender = singleRender;
             _harmony = harmony;
             _installFailureLogged = false;
             _log?.LogInfo(
-                $"[MiddenAdapter] Installed engine-facing render hook on {managedType.FullName}.{topLevelRender}. " +
-                $"Isolated free Camera will use {singleRender} after the game's normal camera pass; dynamic Scene transport resize is pinned for Midden stability.");
+                $"[MiddenAdapter] Installed single-pass engine-facing render hook on {managedType.FullName}.{topLevelRender}. " +
+                "Free Scene Camera is prepended to the normal Midden camera pass; no secondary Render/Submit is performed. " +
+                "Dynamic Scene transport resize remains pinned for Midden stability.");
         }
         catch (Exception ex)
         {
@@ -197,7 +199,8 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
                 {
                 }
             }
-            LogInstallFailureOnce($"Could not install Midden top-level render adapter: {ex}");
+
+            LogInstallFailureOnce($"Could not install Midden single-pass adapter: {ex}");
         }
     }
 
@@ -219,6 +222,7 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
                 {
                 }
             }
+
             return null;
         }
 
@@ -268,41 +272,7 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         return null;
     }
 
-    private static MethodInfo? ResolveSingleCameraRender(Type pipelineType)
-    {
-        foreach (var method in pipelineType.GetMethods(
-                     BindingFlags.Instance |
-                     BindingFlags.Public |
-                     BindingFlags.NonPublic |
-                     BindingFlags.DeclaredOnly))
-        {
-            if (!string.Equals(method.Name, "Render", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var parameters = method.GetParameters();
-            if (parameters.Length != 2)
-            {
-                continue;
-            }
-
-            var contextType = parameters[0].ParameterType;
-            if (!contextType.IsByRef || contextType.GetElementType() != typeof(ScriptableRenderContext))
-            {
-                continue;
-            }
-
-            if (typeof(Camera).IsAssignableFrom(parameters[1].ParameterType))
-            {
-                return method;
-            }
-        }
-
-        return null;
-    }
-
-    // Sable/IL2CPP becomes unstable when the already-published RenderTexture is destroyed and
+    // Sable/IL2CPP becomes unstable when an already-published RenderTexture is destroyed and
     // recreated in response to viewport resizing. Keep the proven transport generation alive and
     // let the Viewer scale it to its viewport. FPS settings still pass through unchanged.
     private static void StabilizeMiddenStreamSettings(
@@ -347,25 +317,18 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         }
     }
 
-    // The second argument deliberately uses object: generated IL2CPP wrappers may expose the
-    // Camera[] parameter as an Il2CppReferenceArray<Camera> rather than a CLR Camera[]. We do
-    // not need to mutate it; the context is the only input required for isolated rendering.
-    private static void AfterMiddenFrameRender(
-        object __instance,
-        ScriptableRenderContext __0,
-        object __1)
+    private static void BeforeMiddenFrameRender(
+        ref Il2CppReferenceArray<Camera> __1,
+        out MiddenFrameState? __state)
     {
+        __state = null;
         _topLevelHits++;
         if (!_firstTopLevelHitLogged)
         {
             _firstTopLevelHitLogged = true;
             _log?.LogInfo(
-                $"[MiddenAdapter] Engine-facing Midden Render hook is active. First hit #{_topLevelHits}; camera-array managed type={__1?.GetType().FullName ?? "<null>"}.");
-        }
-
-        if (_renderingFreeCamera)
-        {
-            return;
+                $"[MiddenAdapter] Engine-facing Midden Render hook is active. First hit #{_topLevelHits}; " +
+                $"camera-array managed type={__1?.GetType().FullName ?? "<null>"}.");
         }
 
         var directController = SourceCaptureField?.GetValue(null) as SourceCameraCaptureController;
@@ -429,9 +392,114 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             ? active
             : 30f;
         var fps = now < interactiveUntil ? interactiveFps : idleFps;
-        FreeNextRenderAtField?.SetValue(controller, now + 1f / Mathf.Max(MinCaptureFps, fps));
 
         var sourceCamera = FindSourceCamera(sourceCameraId, freeCamera);
+        PrepareInitialPose(sourceCameraId, sourceCamera, freeCamera, renderTexture, now);
+        ApplyFollowTransformMethod?.Invoke(controller, new object[] { false });
+
+        freeCamera.enabled = false;
+        freeCamera.targetTexture = renderTexture;
+
+        if (!TryPrependFreeCamera(ref __1, freeCamera))
+        {
+            FreeRenderStatusField?.SetValue(
+                controller,
+                "Midden single-pass Scene render could not inject the free Camera into the engine camera list.");
+            return;
+        }
+
+        FreeNextRenderAtField?.SetValue(controller, now + 1f / Mathf.Max(MinCaptureFps, fps));
+        __state = new MiddenFrameState(
+            controller,
+            freeCamera,
+            renderTexture,
+            transportTexture,
+            renderEvent,
+            copyEventId,
+            sourceCameraId,
+            now,
+            Stopwatch.GetTimestamp());
+    }
+
+    private static void AfterMiddenFrameRender(MiddenFrameState? __state)
+    {
+        if (__state is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // The free Camera was rendered as part of Midden's normal camera pass. Do not invoke
+            // Render or ScriptableRenderContext.Submit here: doing so re-enters process-wide Midden
+            // state and causes the game window to flicker. We only enqueue the transport copy.
+            Graphics.Blit(__state.RenderTexture, __state.TransportTexture);
+            GL.IssuePluginEvent(__state.RenderEvent, __state.CopyEventId);
+
+            var elapsedMs =
+                (Stopwatch.GetTimestamp() - __state.Started) * 1000.0 / Stopwatch.Frequency;
+            FreeRecordRenderTimingMethod?.Invoke(__state.Controller, new object[] { elapsedMs });
+            FreeRecordRenderFrameMethod?.Invoke(__state.Controller, new object[] { __state.Now });
+            FreeRenderStatusField?.SetValue(
+                __state.Controller,
+                "Midden custom SRP free Scene Camera rendered inside the normal engine camera pass and published to NativeBridge.");
+
+            if (!_firstRenderLogged)
+            {
+                _firstRenderLogged = true;
+                _log?.LogInfo(
+                    $"[MiddenAdapter] First single-pass free Scene Camera frame published; " +
+                    $"source={__state.SourceCameraId}, free={__state.FreeCamera.GetInstanceID()}, " +
+                    $"target={__state.RenderTexture.width}x{__state.RenderTexture.height}, " +
+                    $"pos={FormatVector(__state.FreeCamera.transform.position)}. No secondary Render/Submit was used.");
+            }
+        }
+        catch (Exception ex)
+        {
+            FreeRenderStatusField?.SetValue(
+                __state.Controller,
+                $"Midden single-pass Scene publish failed: {ex.Message}");
+            _log?.LogWarning($"[MiddenAdapter] Single-pass Scene publish failed: {ex}");
+        }
+    }
+
+    private static bool TryPrependFreeCamera(
+        ref Il2CppReferenceArray<Camera> cameras,
+        Camera freeCamera)
+    {
+        try
+        {
+            var count = cameras?.Length ?? 0;
+            var expanded = new Il2CppReferenceArray<Camera>(count + 1L);
+            expanded[0] = freeCamera;
+            for (var index = 0; index < count; index++)
+            {
+                expanded[index + 1] = cameras[index];
+            }
+
+            cameras = expanded;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!_arrayInjectionFailureLogged)
+            {
+                _arrayInjectionFailureLogged = true;
+                _log?.LogWarning(
+                    $"[MiddenAdapter] Could not prepend free Camera to Midden camera array: {ex}");
+            }
+
+            return false;
+        }
+    }
+
+    private static void PrepareInitialPose(
+        int sourceCameraId,
+        Camera? sourceCamera,
+        Camera freeCamera,
+        RenderTexture renderTexture,
+        float now)
+    {
         if (_poseSyncSourceCameraId != sourceCameraId)
         {
             _poseSyncSourceCameraId = sourceCameraId;
@@ -439,76 +507,23 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
             _posePropertiesCopied = false;
         }
 
-        if (sourceCamera is not null && now <= _poseSyncUntil)
+        if (sourceCamera is null || now > _poseSyncUntil)
         {
-            if (!_posePropertiesCopied)
-            {
-                var target = renderTexture;
-                freeCamera.CopyFrom(sourceCamera);
-                freeCamera.enabled = false;
-                freeCamera.targetTexture = target;
-                _posePropertiesCopied = true;
-                _log?.LogInfo(
-                    $"[MiddenAdapter] Initial free-Camera pose sync started from {sourceCamera.name}#{sourceCameraId} for {InitialPoseSyncSeconds:0.0}s.");
-            }
-
-            freeCamera.transform.position = sourceCamera.transform.position;
-            freeCamera.transform.rotation = sourceCamera.transform.rotation;
+            return;
         }
 
-        var started = Stopwatch.GetTimestamp();
-        try
+        if (!_posePropertiesCopied)
         {
-            ApplyFollowTransformMethod?.Invoke(controller, new object[] { false });
-
+            freeCamera.CopyFrom(sourceCamera);
             freeCamera.enabled = false;
             freeCamera.targetTexture = renderTexture;
-
-            _renderingFreeCamera = true;
-            var invokeArgs = new object[] { __0, freeCamera };
-            _singleCameraRender?.Invoke(__instance, invokeArgs);
-            if (invokeArgs[0] is ScriptableRenderContext updatedContext)
-            {
-                __0 = updatedContext;
-            }
-
-            // Midden's per-camera renderer records SRP commands into the supplied context.
-            // Submit before the transport blit so NativeBridge never copies the previous frame.
-            __0.Submit();
-            Graphics.Blit(renderTexture, transportTexture);
-            GL.IssuePluginEvent(renderEvent, copyEventId);
-
-            var elapsedMs =
-                (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
-            FreeRecordRenderTimingMethod?.Invoke(controller, new object[] { elapsedMs });
-            FreeRecordRenderFrameMethod?.Invoke(controller, new object[] { now });
-            FreeRenderStatusField?.SetValue(
-                controller,
-                "Midden custom SRP free Scene Camera rendered after the engine-facing camera pass and published to NativeBridge.");
-
-            if (!_firstRenderLogged)
-            {
-                _firstRenderLogged = true;
-                _log?.LogInfo(
-                    $"[MiddenAdapter] First isolated free Scene Camera frame rendered from top-level hook; " +
-                    $"source={sourceCameraId}, free={freeCamera.GetInstanceID()}, target={renderTexture.width}x{renderTexture.height}, pos={FormatVector(freeCamera.transform.position)}.");
-            }
+            _posePropertiesCopied = true;
+            _log?.LogInfo(
+                $"[MiddenAdapter] Initial free-Camera pose sync started from {sourceCamera.name}#{sourceCameraId} for {InitialPoseSyncSeconds:0.0}s.");
         }
-        catch (TargetInvocationException ex)
-        {
-            var inner = ex.InnerException ?? ex;
-            FreeRenderStatusField?.SetValue(controller, $"Midden isolated render failed: {inner.Message}");
-            _log?.LogWarning($"[MiddenAdapter] Isolated render failed: {inner}");
-        }
-        catch (Exception ex)
-        {
-            FreeRenderStatusField?.SetValue(controller, $"Midden isolated render failed: {ex.Message}");
-            _log?.LogWarning($"[MiddenAdapter] Isolated render failed: {ex}");
-        }
-        finally
-        {
-            _renderingFreeCamera = false;
-        }
+
+        freeCamera.transform.position = sourceCamera.transform.position;
+        freeCamera.transform.rotation = sourceCamera.transform.rotation;
     }
 
     private static Camera? FindSourceCamera(int instanceId, Camera freeCamera)
@@ -546,11 +561,10 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         var harmony = _harmony;
         _harmony = null;
         _topLevelRender = null;
-        _singleCameraRender = null;
-        _renderingFreeCamera = false;
         _firstTopLevelHitLogged = false;
         _firstRenderLogged = false;
         _installFailureLogged = false;
+        _arrayInjectionFailureLogged = false;
         _streamResizePinnedLogged = false;
         _poseSyncSourceCameraId = 0;
         _poseSyncUntil = 0f;
@@ -569,5 +583,40 @@ internal sealed class MiddenRenderPipelineAdapter : MonoBehaviour
         }
 
         _log = null;
+    }
+
+    private sealed class MiddenFrameState
+    {
+        internal MiddenFrameState(
+            SceneCameraController controller,
+            Camera freeCamera,
+            RenderTexture renderTexture,
+            RenderTexture transportTexture,
+            IntPtr renderEvent,
+            int copyEventId,
+            int sourceCameraId,
+            float now,
+            long started)
+        {
+            Controller = controller;
+            FreeCamera = freeCamera;
+            RenderTexture = renderTexture;
+            TransportTexture = transportTexture;
+            RenderEvent = renderEvent;
+            CopyEventId = copyEventId;
+            SourceCameraId = sourceCameraId;
+            Now = now;
+            Started = started;
+        }
+
+        internal SceneCameraController Controller { get; }
+        internal Camera FreeCamera { get; }
+        internal RenderTexture RenderTexture { get; }
+        internal RenderTexture TransportTexture { get; }
+        internal IntPtr RenderEvent { get; }
+        internal int CopyEventId { get; }
+        internal int SourceCameraId { get; }
+        internal float Now { get; }
+        internal long Started { get; }
     }
 }
