@@ -42,6 +42,7 @@ public sealed class Plugin : BasePlugin
         RuntimeBehaviour.Initialize(_pipeServer, Log);
         AddComponent<RuntimeBehaviour>();
         AddComponent<SourceCaptureEndOfFrameFallback>();
+        AddComponent<MiddenRenderPipelineAdapter>();
         AddComponent<SceneDiagnosticsBehaviour>();
 
         Log.LogInfo($"U3D Viewer IL2CPP agent loaded. Pipe: {pipeName}");
@@ -127,9 +128,6 @@ public sealed class Plugin : BasePlugin
                 return true;
             }
 
-            // SRP recovery only needs to hand the already-existing transport texture back to
-            // the process-global NativeBridge. Releasing/recreating the Camera RenderTextures
-            // during a direct-capture handoff is unnecessary and has proven unsafe on IL2CPP.
             if (command.Kind == ViewerCommandKind.CameraRecover &&
                 RenderPipelineManager.currentPipeline is not null)
             {
@@ -137,10 +135,6 @@ public sealed class Plugin : BasePlugin
                 return false;
             }
 
-            // When direct capture releases the process-global NativeBridge, the free Camera
-            // must be allowed to rebuild its transport even though its previous shared name
-            // is no longer writer-ready. Deferring CameraRecover in this state deadlocks the
-            // handoff: no producer owns the bridge, so no first frame can ever arrive.
             if (!SceneTransportCoordinator.IsOwner(SceneTransportOwner.FreeCamera))
             {
                 return true;
@@ -252,9 +246,6 @@ public sealed class Plugin : BasePlugin
                 _sharedLog?.LogInfo(
                     $"[SceneDiag] Free transport before reset: rt={transportTexture.name} {transportTexture.width}x{transportTexture.height}, created={transportTexture.IsCreated()}, nativePtr=0x{nativeTexture.ToInt64():X}.");
 
-                // Reset the one process-global writer, then make the still-live free transport
-                // texture a fresh generation. TryInitializeBridge will call SetSourceTexture,
-                // which observes FreeCamera ownership again.
                 NativeBridge.U3DViewer_Reset();
                 SceneTransportCoordinator.Observe(SceneTransportOwner.FreeCamera);
                 BridgeReadyField.SetValue(instance, false);
@@ -386,8 +377,6 @@ public sealed class Plugin : BasePlugin
                         $"Free Scene Camera is rendered by the active RenderPipeline ({pipelineName}); NativeBridge publication occurs at end-of-frame.");
                 }
 
-                // Do not call Camera.Render() under SRP. The enabled U3DViewer Camera targets
-                // its own RenderTexture and is rendered normally by the game's RenderPipeline.
                 return false;
             }
             catch (Exception ex)
